@@ -9,6 +9,7 @@
 
 - Move upstream calls to the OpenCode Go inference API (`https://opencode.ai/inference/go`): Chat Completions and Responses use `/openai/v1/...`, Messages uses `/anthropic/v1/messages`, and quota uses `/v1/usage`.
 - Route `claude-haiku-5-5`, `space-bunny`, `step-5-preview`, and `beam-free`, which the old built-in family table missed.
+- Build against the CLIProxyAPI v8.0.33 SDK and the latest dependencies. Its Gemini-to-Claude translator keeps signed Gemini answer text as visible text instead of a thinking block, which left Claude clients with an empty answer.
 - Build upstream requests from the payload CLIProxyAPI hands the executor instead of the raw client body, so host request interceptors apply and clients in formats the plugin does not declare (for example native Gemini clients, translated by the host) work.
 
 - Preserve Claude image tool results when routing to Chat Completions: retain images in an associated user message after tool replies, preserve text, tool references and error markers, and include images in session derivation. The selected upstream model must support image input.

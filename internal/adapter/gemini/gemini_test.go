@@ -300,3 +300,50 @@ func TestBuildRequestClosesPrefill(t *testing.T) {
 		}
 	}
 }
+
+// Gemini 3+ signs visible answer text; Claude clients must still receive it
+// as text, not as a thinking block (CPA's translator filed it as thinking
+// before SDK v8.0.33). Real thoughts stay thinking.
+func TestClaudeSignedTextStaysText(t *testing.T) {
+	body := `{"responseId":"r1","modelVersion":"gemini-4","candidates":[{"content":{"role":"model","parts":[` +
+		`{"text":"plan","thought":true},{"text":"pong","thoughtSignature":"sig-1"}]},"finishReason":"STOP"}],` +
+		`"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4}}`
+	out, eErr := ConvertNonStreamResponse("claude", testModel, []byte(`{"messages":[]}`), []byte(`{}`), 200, []byte(body))
+	if eErr != nil {
+		t.Fatal(eErr)
+	}
+	var msg struct {
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Thinking string `json:"thinking"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(out, &msg); err != nil {
+		t.Fatal(err)
+	}
+	var text, thinking string
+	for _, b := range msg.Content {
+		text += b.Text
+		thinking += b.Thinking
+	}
+	if text != "pong" || thinking != "plan" {
+		t.Fatalf("non-stream content = %s", out)
+	}
+
+	sc := NewStreamConverter("claude", testModel, []byte(`{"messages":[]}`), []byte(`{}`))
+	events, _, eErr := sc.Feed([]byte("data: " + body + "\n\n"))
+	if eErr != nil {
+		t.Fatal(eErr)
+	}
+	joined := strings.Join(func() []string {
+		var s []string
+		for _, e := range events {
+			s = append(s, string(e))
+		}
+		return s
+	}(), "")
+	if !strings.Contains(joined, `"text_delta","text":"pong"`) || strings.Contains(joined, `"thinking":"pong"`) {
+		t.Fatalf("stream events:\n%s", joined)
+	}
+}
