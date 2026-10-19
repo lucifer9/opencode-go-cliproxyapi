@@ -15,7 +15,8 @@ import (
 
 // Defaults (spec 04 §2/§4).
 const (
-	DefaultBaseURL          = "https://opencode.ai/inference/go"
+	DefaultModelsDocURL     = "https://opencode.ai/v2/docs/console/go"
+	DefaultUsageURL         = "https://opencode.ai/inference/go/v1/usage"
 	DefaultModelPrefix      = "opencode-go"
 	DefaultRefreshInterval  = 15 * time.Minute
 	DefaultRequestTimeout   = 5 * time.Minute
@@ -43,19 +44,13 @@ type Protocols struct {
 	Responses       bool
 }
 
-type RouteOverride struct {
-	Protocol string `yaml:"protocol"`
-	Endpoint string `yaml:"endpoint"`
-}
-
 type Config struct {
-	BaseURL          string
-	CatalogURL       string
+	ModelsDocURL     string
+	UsageURL         string
 	ModelPrefix      ModelPrefix
 	APIKeys          []APIKey
 	Catalog          Catalog
 	Protocols        Protocols
-	RouteOverrides   map[string]RouteOverride
 	AllowHTTP        bool
 	RequestTimeout   time.Duration
 	MaxResponseBytes int64
@@ -65,16 +60,15 @@ type Config struct {
 // (apply default) from explicitly-set values including "" (validate as-is).
 // Unknown fields are ignored (host may pass extra keys).
 type rawConfig struct {
-	BaseURL          *string                  `yaml:"base-url"`
-	CatalogURL       *string                  `yaml:"catalog-url"`
-	ModelPrefix      rawPrefix                `yaml:"model-prefix"`
-	APIKeys          []rawKey                 `yaml:"api-keys"`
-	Catalog          rawCatalog               `yaml:"catalog"`
-	Protocols        rawProtocols             `yaml:"protocols"`
-	RouteOverrides   map[string]RouteOverride `yaml:"route-overrides"`
-	AllowHTTP        bool                     `yaml:"allow-http"`
-	RequestTimeout   *string                  `yaml:"request-timeout"`
-	MaxResponseBytes *int64                   `yaml:"max-response-bytes"`
+	ModelsDocURL     *string      `yaml:"models-doc-url"`
+	UsageURL         *string      `yaml:"usage-url"`
+	ModelPrefix      rawPrefix    `yaml:"model-prefix"`
+	APIKeys          []rawKey     `yaml:"api-keys"`
+	Catalog          rawCatalog   `yaml:"catalog"`
+	Protocols        rawProtocols `yaml:"protocols"`
+	AllowHTTP        bool         `yaml:"allow-http"`
+	RequestTimeout   *string      `yaml:"request-timeout"`
+	MaxResponseBytes *int64       `yaml:"max-response-bytes"`
 }
 
 type rawPrefix struct {
@@ -97,10 +91,6 @@ type rawProtocols struct {
 	Messages        *bool `yaml:"messages"`
 	Responses       *bool `yaml:"responses"`
 }
-
-var (
-	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true}
-)
 
 // Load decodes YAML, expands ${VAR} references in api-key values only,
 // applies defaults, and validates (spec 04 §6). Decode errors never echo
@@ -130,7 +120,8 @@ func Load(yamlBytes []byte) (Config, error) {
 		return Config{}, fmt.Errorf("request-timeout: must be positive")
 	}
 	c := Config{
-		BaseURL: orDefault(raw.BaseURL, DefaultBaseURL),
+		ModelsDocURL: orDefault(raw.ModelsDocURL, DefaultModelsDocURL),
+		UsageURL:     orDefault(raw.UsageURL, DefaultUsageURL),
 		ModelPrefix: ModelPrefix{
 			Enabled: orDefault(raw.ModelPrefix.Enabled, true),
 			Value:   orDefault(raw.ModelPrefix.Value, DefaultModelPrefix),
@@ -145,17 +136,9 @@ func Load(yamlBytes []byte) (Config, error) {
 			Messages:        orDefault(raw.Protocols.Messages, true),
 			Responses:       orDefault(raw.Protocols.Responses, true),
 		},
-		RouteOverrides:   raw.RouteOverrides,
 		AllowHTTP:        raw.AllowHTTP,
 		RequestTimeout:   requestTimeout,
 		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
-	}
-	if raw.CatalogURL != nil {
-		// Mirror the derived-default trim so an explicit trailing-slash
-		// catalog-url cannot double up separators downstream.
-		c.CatalogURL = strings.TrimRight(*raw.CatalogURL, "/")
-	} else {
-		c.CatalogURL = strings.TrimRight(c.BaseURL, "/") + "/v1/models"
 	}
 	if err := c.validate(); err != nil {
 		return Config{}, err
@@ -172,10 +155,10 @@ func PublicID(c Config, upstreamID string) string {
 }
 
 func (c Config) validate() error {
-	if err := validateURL("base-url", c.BaseURL, c.AllowHTTP); err != nil {
+	if err := validateURL("models-doc-url", c.ModelsDocURL, c.AllowHTTP); err != nil {
 		return err
 	}
-	if err := validateURL("catalog-url", c.CatalogURL, c.AllowHTTP); err != nil {
+	if err := validateURL("usage-url", c.UsageURL, c.AllowHTTP); err != nil {
 		return err
 	}
 	if len(c.APIKeys) == 0 {
@@ -198,17 +181,6 @@ func (c Config) validate() error {
 	}
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
-	}
-	for name, o := range c.RouteOverrides {
-		if !validProtocols[o.Protocol] {
-			return fmt.Errorf("route-overrides[%s].protocol: unsupported protocol %q", name, o.Protocol)
-		}
-		if o.Endpoint == "" {
-			return fmt.Errorf("route-overrides[%s].endpoint: must not be empty", name)
-		}
-		if !strings.HasPrefix(o.Endpoint, "/") {
-			return fmt.Errorf("route-overrides[%s].endpoint: must start with /", name)
-		}
 	}
 	if c.ModelPrefix.Enabled && !validPrefix(c.ModelPrefix.Value) {
 		return fmt.Errorf("model-prefix.value: invalid provider-ID characters %q", c.ModelPrefix.Value)

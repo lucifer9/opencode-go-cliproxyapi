@@ -4,5 +4,6 @@ go 1.26.7
 
 require (
 	github.com/router-for-me/CLIProxyAPI/v8 v8.0.0
+	golang.org/x/net v0.57.0
 	gopkg.in/yaml.v3 v3.0.1
 )

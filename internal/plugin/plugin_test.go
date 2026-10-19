@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -25,12 +26,45 @@ import (
 // ---- test doubles -------------------------------------------------------
 
 const (
-	testKey         = "sk-test-secret-1"
-	testCatalogJSON = `{"data":[{"id":"glm-5.3"}]}`
-	testValidYAML   = "api-keys:\n  - value: " + testKey + "\n"
-	dummyKey        = "sk-test"
-	dummyKeyYAML    = "api-keys:\n  - value: " + dummyKey + "\n"
+	testKey       = "sk-test-secret-1"
+	testValidYAML = "api-keys:\n  - value: " + testKey + "\n"
+	dummyKey      = "sk-test"
+	dummyKeyYAML  = "api-keys:\n  - value: " + dummyKey + "\n"
+	testDocBase   = "https://opencode.ai/inference/go"
 )
+
+var testCatalogDoc = docPage(testDocBase, chatModel("glm-5.3"))
+
+// docModel is one row of a test docs-page Endpoints table.
+type docModel struct{ id, pkg string }
+
+func chatModel(id string) docModel { return docModel{id, "@ai-sdk/openai-compatible"} }
+func msgModel(id string) docModel  { return docModel{id, "@ai-sdk/anthropic"} }
+func respModel(id string) docModel { return docModel{id, "@ai-sdk/openai"} }
+
+var docPackagePaths = map[string]string{
+	"@ai-sdk/openai-compatible": "/openai/v1/chat/completions",
+	"@ai-sdk/anthropic":         "/anthropic/v1/messages",
+	"@ai-sdk/openai":            "/openai/v1/responses",
+}
+
+// docPage renders a docs page whose Endpoints table points each model at
+// base plus its package's protocol path.
+func docPage(base string, models ...docModel) string {
+	var b strings.Builder
+	b.WriteString(`<table><tr><th>Model</th><th>Model ID</th><th>Endpoint</th><th>AI SDK Package</th></tr>`)
+	for _, mo := range models {
+		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td><code>%s%s</code></td><td><code>%s</code></td></tr>`,
+			mo.id, mo.id, base, docPackagePaths[mo.pkg], mo.pkg)
+	}
+	b.WriteString(`</table>`)
+	return b.String()
+}
+
+// isDocFetch reports whether a bridged URL is the docs-page catalog fetch.
+func isDocFetch(url string) bool {
+	return strings.Contains(url, "/docs/")
+}
 
 type capturedCall struct {
 	method  string
@@ -222,12 +256,12 @@ func installFastLoop(t *testing.T, m *Manager, yamlText string) {
 func manualTick(t *testing.T, m *Manager) {
 	t.Helper()
 	m.mu.RLock()
-	mgr, cfg := m.mgr, m.cfg
+	mgr := m.mgr
 	m.mu.RUnlock()
 	if mgr == nil {
 		t.Fatal("no served manager to tick")
 	}
-	if err := refreshOnce(context.Background(), mgr, m.bridge, time.Second, cfg); err != nil {
+	if err := refreshOnce(context.Background(), mgr, m.bridge, time.Second); err != nil {
 		t.Fatalf("tick refresh: %v", err)
 	}
 }
@@ -417,7 +451,7 @@ func TestBridgeAuthListDecodesEntries(t *testing.T) {
 // ---- dispatcher: registration ------------------------------------------
 
 func TestRegisterSuccessPublishesModels(t *testing.T) {
-	m, f := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, f := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
@@ -430,7 +464,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if reg.Metadata.Name != "opencode-go-cliproxyapi" || reg.Metadata.Version != pluginVersion ||
-		len(reg.Metadata.ConfigFields) != 10 {
+		len(reg.Metadata.ConfigFields) != len(pluginConfigFields()) {
 		t.Fatalf("metadata wrong: %+v", reg.Metadata)
 	}
 	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider {
@@ -448,13 +482,8 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 	if wire["method"] != http.MethodGet {
 		t.Fatalf("bridged method = %v, want GET", wire["method"])
 	}
-	if wire["url"] != "https://opencode.ai/inference/go/v1/models" {
+	if wire["url"] != config.DefaultModelsDocURL {
 		t.Fatalf("bridged url = %v", wire["url"])
-	}
-	headers := wire["headers"].(map[string]any)
-	auth := headers["Authorization"].([]any)[0].(string)
-	if auth != "Bearer "+testKey {
-		t.Fatalf("bridged Authorization = %q", auth)
 	}
 
 	var static pluginapi.ModelResponse
@@ -477,7 +506,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 }
 
 func TestRegistrationConfigFields(t *testing.T) {
-	m, _ := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, _ := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
@@ -492,12 +521,11 @@ func TestRegistrationConfigFields(t *testing.T) {
 		typ  pluginapi.ConfigFieldType
 	}{
 		{"api-keys", pluginapi.ConfigFieldTypeArray},
-		{"base-url", pluginapi.ConfigFieldTypeString},
-		{"catalog-url", pluginapi.ConfigFieldTypeString},
+		{"models-doc-url", pluginapi.ConfigFieldTypeString},
+		{"usage-url", pluginapi.ConfigFieldTypeString},
 		{"model-prefix", pluginapi.ConfigFieldTypeObject},
 		{"catalog", pluginapi.ConfigFieldTypeObject},
 		{"protocols", pluginapi.ConfigFieldTypeObject},
-		{"route-overrides", pluginapi.ConfigFieldTypeObject},
 		{"request-timeout", pluginapi.ConfigFieldTypeString},
 		{"max-response-bytes", pluginapi.ConfigFieldTypeInteger},
 		{"allow-http", pluginapi.ConfigFieldTypeBoolean},
@@ -524,7 +552,7 @@ func TestRegistrationConfigFields(t *testing.T) {
 func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 	first, second, third := "sk-materialize-a", "sk-materialize-b", "sk-materialize-c"
 	yamlText := "api-keys:\n  - value: " + first + "\n  - value: " + second + "\n"
-	f := &fakeCaller{responder: catalogResponder(true, testCatalogJSON)}
+	f := &fakeCaller{responder: catalogResponder(true, testCatalogDoc)}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(yamlText)); err != nil {
@@ -593,7 +621,7 @@ func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 }
 
 func TestLifecycleUsesCPAAuthListAfterManagerRestart(t *testing.T) {
-	f := &fakeCaller{responder: catalogResponder(true, testCatalogJSON)}
+	f := &fakeCaller{responder: catalogResponder(true, testCatalogDoc)}
 	first := NewManager(NewHostBridge(f.call))
 	if _, err := first.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("first register: %v", err)
@@ -642,7 +670,7 @@ func TestLifecycleAuthListFailureDoesNotWrite(t *testing.T) {
 // host drop the plugin on every register/reconfigure, so the field must be
 // non-empty AND actually marshal into the envelope bytes.
 func TestRegisterMetadataCarriesGitHubRepository(t *testing.T) {
-	m, _ := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, _ := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
@@ -668,7 +696,7 @@ func TestRegisterMetadataCarriesGitHubRepository(t *testing.T) {
 }
 
 func TestRegisterIgnoresInjectedHostKeys(t *testing.T) {
-	m, _ := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, _ := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	yamlText := testValidYAML + "enabled: true\npriority: 42\n"
 	resp, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(yamlText))
@@ -712,7 +740,7 @@ func TestMalformedLifecycleAndUnknownMethods(t *testing.T) {
 }
 
 func TestReconfigureSwapsPrefixIDs(t *testing.T) {
-	m, _ := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, _ := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("register: %v", err)
@@ -759,8 +787,9 @@ func TestRefreshFailureStillRegistersAndWarnsWithoutSecrets(t *testing.T) {
 	}
 }
 
-func TestRegisterRefreshesWithConfiguredBearer(t *testing.T) {
-	m, f := newTestManager(catalogResponder(true, testCatalogJSON))
+// The docs page is public, so the catalog refresh never carries an API key.
+func TestRegisterRefreshSendsNoCredential(t *testing.T) {
+	m, f := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(dummyKeyYAML))
 	if err != nil {
@@ -777,9 +806,8 @@ func TestRegisterRefreshesWithConfiguredBearer(t *testing.T) {
 	if err := json.Unmarshal(calls[0].payload, &wire); err != nil {
 		t.Fatalf("bridge payload: %v", err)
 	}
-	headers := wire["headers"].(map[string]any)
-	if headers["Authorization"].([]any)[0].(string) != "Bearer "+dummyKey {
-		t.Fatalf("expected configured bearer key, got %v", headers)
+	if strings.Contains(string(calls[0].payload), dummyKey) {
+		t.Fatalf("catalog refresh carries the API key: %s", calls[0].payload)
 	}
 }
 
@@ -793,9 +821,9 @@ func TestRegisterWithBlockingCatalogReturnsQuickly(t *testing.T) {
 	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
 		var wire map[string]any
 		if method == pluginabi.MethodHostHTTPDo && json.Unmarshal(payload, &wire) == nil {
-			if url, _ := wire["url"].(string); strings.HasSuffix(url, "/models") {
+			if url, _ := wire["url"].(string); isDocFetch(url) {
 				<-release // block far past the register timeout
-				return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(testCatalogJSON)}), nil
+				return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(testCatalogDoc)}), nil
 			}
 		}
 		return hostOK(map[string]any{}), nil
@@ -834,7 +862,7 @@ func TestModelsBeforeRegisterIsEmptyNotError(t *testing.T) {
 }
 
 func TestShutdownClearsStateAndStopsTicker(t *testing.T) {
-	f := &fakeCaller{responder: catalogResponder(true, testCatalogJSON)}
+	f := &fakeCaller{responder: catalogResponder(true, testCatalogDoc)}
 	m := NewManager(NewHostBridge(f.call))
 	installFastLoop(t, m, testValidYAML)
 	waitFor(t, "periodic refresh ticks", func() bool {
@@ -846,7 +874,7 @@ func TestShutdownClearsStateAndStopsTicker(t *testing.T) {
 		t.Fatalf("shutdown envelope = %s", resp)
 	}
 	m.mu.Lock()
-	stopped := m.stop == nil && m.done == nil && m.mgr == nil && m.cfg.BaseURL == ""
+	stopped := m.stop == nil && m.done == nil && m.mgr == nil && m.cfg.ModelsDocURL == ""
 	m.mu.Unlock()
 	if !stopped {
 		t.Fatal("shutdown left state behind")
@@ -949,7 +977,7 @@ func TestRegisterSurvivesNilHostBridge(t *testing.T) {
 // ---- concurrency --------------------------------------------------------
 
 func TestConcurrentHandleCalls(t *testing.T) {
-	m, _ := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, _ := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("register: %v", err)
@@ -990,7 +1018,7 @@ func TestOverlappingLifecyclesLeaveSingleTicker(t *testing.T) {
 	// exit on stop (no orphaned loops keep refreshing). Validated configs
 	// floor refresh-interval at 1m, so the survivor is checked structurally
 	// — one tracked loop that exits on stop — instead of by counting ticks.
-	m, f := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, f := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -1032,8 +1060,8 @@ func TestReconfigureFailedRefreshServesViaTicks(t *testing.T) {
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
-	catalogV1 := `{"data":[{"id":"glm-5.3"}]}`
-	catalogV2 := `{"data":[{"id":"minimax-m3"}]}`
+	catalogV1 := docPage(testDocBase, chatModel("glm-5.3"))
+	catalogV2 := docPage(testDocBase, msgModel("minimax-m3"))
 	var fetches atomic.Int64
 	f.responder = func(method string, payload []byte) ([]byte, error) {
 		if method != pluginabi.MethodHostHTTPDo {
@@ -1042,7 +1070,7 @@ func TestReconfigureFailedRefreshServesViaTicks(t *testing.T) {
 		var wire map[string]any
 		_ = json.Unmarshal(payload, &wire)
 		url, _ := wire["url"].(string)
-		if !strings.HasSuffix(url, "/models") {
+		if !isDocFetch(url) {
 			return hostOK(map[string]any{}), nil
 		}
 		switch fetches.Add(1) {
@@ -1093,14 +1121,14 @@ func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
 		if err := json.Unmarshal(payload, &wire); err != nil {
 			return hostOK(map[string]any{}), nil
 		}
-		if url, _ := wire["url"].(string); strings.HasSuffix(url, "/models") {
+		if url, _ := wire["url"].(string); isDocFetch(url) {
 			if !syncServed.CompareAndSwap(false, true) {
 				close(started) // a tick is now in flight against a hung upstream
 				<-release      // block far past any sane shutdown wait
-				return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(testCatalogJSON)}), nil
+				return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(testCatalogDoc)}), nil
 			}
 			// Serve the synchronous register refresh instantly.
-			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(testCatalogJSON)}), nil
+			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(testCatalogDoc)}), nil
 		}
 		return hostOK(map[string]any{}), nil
 	}}
@@ -1131,12 +1159,12 @@ func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
 // fix: a failed-refresh reconfigure must adopt the NEW manager (seeded with
 // the old last-good records) so carried-over models stay visible between the
 // failure and the next success, and background ticks fetch the NEW
-// catalog-url instead of the old one forever.
+// models-doc-url instead of the old one forever.
 func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
-	oldURL := "https://opencode.ai/inference/go/v1/models"
-	newURL := "https://mirror.test/api/v1/models"
-	catalogV1 := `{"data":[{"id":"glm-5.3"}]}`
-	catalogV2 := `{"data":[{"id":"minimax-m3"}]}`
+	oldURL := config.DefaultModelsDocURL
+	newURL := "https://opencode.ai/docs/go"
+	catalogV1 := docPage(testDocBase, chatModel("glm-5.3"))
+	catalogV2 := docPage(testDocBase, msgModel("minimax-m3"))
 	var allowOldURL atomic.Bool
 	allowOldURL.Store(true)
 	var failNewSync atomic.Bool
@@ -1148,15 +1176,15 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 		var wire map[string]any
 		_ = json.Unmarshal(payload, &wire)
 		url, _ := wire["url"].(string)
-		if !strings.HasSuffix(url, "/models") {
+		if !isDocFetch(url) {
 			return hostOK(map[string]any{}), nil
 		}
 		switch url {
 		case oldURL:
-			// Every /models fetch after the reconfigure returned must target
+			// Every docs fetch after the reconfigure returned must target
 			// the NEW url; old-loop ticks all complete before it returns.
 			if !allowOldURL.Load() {
-				t.Error("tick used the OLD catalog-url after reconfigure")
+				t.Error("tick used the OLD models-doc-url after reconfigure")
 				return hostErr("old_url", url), nil
 			}
 			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(catalogV1)}), nil
@@ -1178,8 +1206,8 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 	}
 	assertStaticModel(t, m, "opencode-go/glm-5.3")
 
-	newBaseYAML := testValidYAML + "base-url: https://mirror.test/api\n"
-	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(newBaseYAML)); err != nil {
+	newDocYAML := testValidYAML + "models-doc-url: " + newURL + "\n"
+	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(newDocYAML)); err != nil {
 		t.Fatalf("reconfigure: %v", err)
 	}
 	allowOldURL.Store(false)
@@ -1199,8 +1227,8 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 // stale-while-unavailable — fail-closed serves nothing immediately (matching
 // Manager.fail's ticker behavior), stale-enabled keeps carrying over.
 func TestReconfigureFailedRefreshHonorsStalePolicy(t *testing.T) {
-	catalogV1 := `{"data":[{"id":"glm-5.3"}]}`
-	catalogV2 := `{"data":[{"id":"minimax-m3"}]}`
+	catalogV1 := docPage(testDocBase, chatModel("glm-5.3"))
+	catalogV2 := docPage(testDocBase, msgModel("minimax-m3"))
 	for _, tc := range []struct {
 		name          string
 		policyYAML    string
@@ -1217,7 +1245,7 @@ func TestReconfigureFailedRefreshHonorsStalePolicy(t *testing.T) {
 				}
 				var wire map[string]any
 				_ = json.Unmarshal(payload, &wire)
-				if url, _ := wire["url"].(string); !strings.HasSuffix(url, "/models") {
+				if url, _ := wire["url"].(string); !isDocFetch(url) {
 					return hostOK(map[string]any{}), nil
 				}
 				switch fetches.Add(1) {

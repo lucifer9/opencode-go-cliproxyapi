@@ -43,7 +43,7 @@ func TestQuotaSelectedCredential(t *testing.T) {
 		return hostOK(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"usage":{"rolling":{"percent":25,"resetsAt":"2026-10-01T00:00:00Z"},"weekly":{"percent":100},"monthly":{"percent":0}}}`)}), nil
 	}}
 	m := NewManager(NewHostBridge(f.call))
-	m.cfg = config.Config{BaseURL: "https://quota.test/", APIKeys: []config.APIKey{{Value: "not-selected"}}}
+	m.cfg = config.Config{UsageURL: "https://quota.test/v1/usage", APIKeys: []config.APIKey{{Value: "not-selected"}}}
 	body, _ := json.Marshal(pluginapi.QuotaFetchRequest{Provider: ProviderID, Attributes: map[string]string{"api_key": "selected"}})
 	var got pluginapi.QuotaFetchResponse
 	decodeResult(t, mustHandle(t, m, pluginabi.MethodQuotaFetch, body), &got)
@@ -75,7 +75,7 @@ func TestQuotaValidation(t *testing.T) {
 func TestQuotaErrorsRedacted(t *testing.T) {
 	for _, response := range []pluginapi.HTTPResponse{{StatusCode: 401, Body: []byte("secret")}, {StatusCode: http.StatusOK, Body: []byte("secret")}} {
 		m := NewManager(NewHostBridge((&fakeCaller{responder: func(string, []byte) ([]byte, error) { return hostOK(response), nil }}).call))
-		m.cfg = config.Config{BaseURL: "https://quota.test"}
+		m.cfg = config.Config{UsageURL: "https://quota.test/v1/usage"}
 		_, err := m.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: ProviderID, Attributes: map[string]string{"api_key": "secret"}})
 		if err == nil || strings.Contains(err.Error(), "secret") {
 			t.Fatal("unredacted or missing error")

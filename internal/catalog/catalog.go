@@ -1,17 +1,16 @@
-// Package catalog fetches the live OpenCode Go /v1/models catalog,
-// normalizes metadata, assigns routes, and serves the last good snapshot
-// (FR-002, FR-003, FR-004, FR-010).
+// Package catalog fetches the OpenCode Go docs page, reads its Endpoints
+// table (model ID, upstream URL, AI SDK package), assigns routes, and serves
+// the last good snapshot (FR-002, FR-003, FR-004, FR-010).
 //
-// Route resolution priority follows arch spec §5: user route override >
-// built-in compatibility table > unsupported (excluded from the routable set,
-// kept in diagnostics).
+// The docs table is the only source of models and routes: a row whose AI SDK
+// package has no adapter, or whose URL leaves the docs host, is excluded from
+// the routable set and kept in diagnostics.
 //
 // No scheduling lives here; M3 wires the refresh cadence.
 package catalog
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -24,7 +23,7 @@ import (
 )
 
 // catalogBudgetFloor keeps an undersized max-response-bytes knob from
-// freezing stale serving forever: catalogs grow larger than typical
+// freezing stale serving forever: the docs page can grow larger than typical
 // completion bodies, so the fetch budget never drops below 16 MiB while
 // max-response-bytes stays meaningful for completions elsewhere.
 const catalogBudgetFloor = 16 << 20
@@ -38,8 +37,9 @@ const (
 	RouteResponses       Route = "responses"
 )
 
-// EndpointPath returns the upstream endpoint path for the route (FR-004).
-// routeEndpoints maps each route to its upstream endpoint path.
+// routeEndpoints maps each route to its upstream endpoint path under the
+// inference base. Adapters use it to label errors and tool policy; request
+// URLs come from the docs table (ModelRecord.UpstreamURL).
 var routeEndpoints = map[Route]string{
 	RouteChatCompletions: "/openai/v1/chat/completions",
 	RouteMessages:        "/anthropic/v1/messages",
@@ -59,18 +59,23 @@ func routeFromString(s string) (Route, bool) {
 	return "", false
 }
 
-// ModelRecord is one routable normalized catalog entry (arch §7, FR-003).
+// packageRoutes maps the docs table's AI SDK package to the route serving
+// it, the same rule the OpenCode client uses to pick its SDK.
+var packageRoutes = map[string]Route{
+	"@ai-sdk/openai":            RouteResponses,
+	"@ai-sdk/openai-compatible": RouteChatCompletions,
+	"@ai-sdk/anthropic":         RouteMessages,
+}
+
+// ModelRecord is one routable catalog entry (arch §7, FR-003). The docs
+// table carries no context, modality, or thinking metadata, so none is
+// published.
 type ModelRecord struct {
-	PublicID     string
-	UpstreamID   string
-	DisplayName  string
-	Protocol     Route
-	EndpointPath string
-	ContextLimit int64
-	OutputLimit  int64
-	InputModes   []string
-	OutputModes  []string
-	Thinking     *pluginapi.ThinkingSupport
+	PublicID    string
+	UpstreamID  string
+	DisplayName string
+	Protocol    Route
+	UpstreamURL string
 }
 
 // UnsupportedModel is a discovered model excluded from the routable set,
@@ -86,53 +91,6 @@ type HostClient interface {
 	Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error)
 }
 
-// rawModel tolerantly decodes one catalog entry; unknown fields —
-// including protocol/endpoint fields the catalog does not provide and
-// reasoning/tool_calling flags the plugin does not act on — are ignored via
-// json tags. Modality metadata accepts both spellings.
-type rawModel struct {
-	ID               string       `json:"id"`
-	DisplayName      string       `json:"display_name"`
-	ContextLength    int64        `json:"context_length"`
-	MaxOutputTokens  int64        `json:"max_output_tokens"`
-	InputModes       []string     `json:"input_modes"`
-	OutputModes      []string     `json:"output_modes"`
-	InputModalities  []string     `json:"input_modalities"`
-	OutputModalities []string     `json:"output_modalities"`
-	Thinking         *rawThinking `json:"thinking"`
-}
-
-// rawThinking tolerantly decodes the optional per-model thinking object;
-// pluginapi.ThinkingSupport itself is untagged, so snake_case upstream keys
-// are decoded here and mapped field-by-field (partial objects decode to a
-// partial struct).
-type rawThinking struct {
-	Min            *int     `json:"min"`
-	Max            *int     `json:"max"`
-	ZeroAllowed    *bool    `json:"zero_allowed"`
-	DynamicAllowed *bool    `json:"dynamic_allowed"`
-	Levels         []string `json:"levels"`
-}
-
-// prefixRoutes covers unknown variants of known families;
-// longest prefix wins (list is ordered longest-first).
-var prefixRoutes = []struct {
-	prefix string
-	route  Route
-}{
-	{"muse-spark", RouteResponses},
-	{"deepseek", RouteChatCompletions},
-	{"minimax", RouteMessages},
-	{"longcat", RouteChatCompletions},
-	{"grok", RouteResponses},
-	{"gpt", RouteResponses},
-	{"kimi", RouteChatCompletions},
-	{"qwen", RouteMessages},
-	{"glm", RouteChatCompletions},
-	{"mimo", RouteChatCompletions},
-	{"hy", RouteChatCompletions},
-}
-
 // Manager owns the catalog snapshot. All accessors are safe for
 // concurrent use alongside Refresh.
 type Manager struct {
@@ -140,11 +98,11 @@ type Manager struct {
 	client HostClient
 
 	mu sync.Mutex
-	// raw retains the decoded upstream entries behind the current snapshot
-	// so SeedFrom can rebuild records against a NEW config (route overrides,
-	// protocol flags, and prefix settings may all have changed since the
-	// snapshot was built).
-	raw    []rawModel
+	// raw retains the parsed docs rows behind the current snapshot so
+	// SeedFrom can rebuild records against a NEW config (protocol flags,
+	// docs URL, and prefix settings may all have changed since the snapshot
+	// was built).
+	raw    []docRow
 	models []ModelRecord
 	// index maps both PublicID and UpstreamID to their record so ID
 	// resolution is O(1); rebuilt atomically with models on every swap.
@@ -159,13 +117,12 @@ func New(cfg config.Config, client HostClient) *Manager {
 }
 
 // SeedFrom republishes prev's last-good snapshot into m by REBUILDING every
-// record from prev's raw upstream entries through the same
-// resolution/validation path a refresh applies, but against m's OWN cfg:
-// routes re-resolve (a removed override drops its model), the protocolEnabled
-// gate re-applies, PublicIDs recompute under m's prefix, endpoints re-check
-// against m's base-url, and collisions/diagnostics regenerate (arch §5).
+// record from prev's raw docs rows through the same validation path a
+// refresh applies, but against m's OWN cfg: the protocolEnabled gate
+// re-applies, PublicIDs recompute under m's prefix, URLs re-check against
+// m's docs host, and collisions/diagnostics regenerate (arch §5).
 //
-// m keeps its OWN cfg: subsequent Refresh calls use m's base-url/catalog-url/
+// m keeps its OWN cfg: subsequent Refresh calls use m's models-doc-url/
 // protocols/prefix (F5: a failed-refresh reconfigure must adopt the new
 // manager rather than keep ticking the old URL). Because seeding rebuilds
 // instead of copying, a config change between snapshots takes effect at seed
@@ -179,11 +136,12 @@ func (m *Manager) SeedFrom(prev *Manager) {
 	m.swap(raw)
 }
 
-// Refresh fetches and swaps the catalog snapshot. On failure it returns a
-// classified, key-free error; the previous snapshot keeps serving while
-// catalog.stale-while-unavailable is enabled, otherwise the routable set
-// is cleared until the next success (FR-002).
-func (m *Manager) Refresh(ctx context.Context, apiKey string) error {
+// Refresh fetches the docs page and swaps the catalog snapshot. The page is
+// public, so no credential is sent. On failure it returns a classified,
+// key-free error; the previous snapshot keeps serving while
+// catalog.stale-while-unavailable is enabled, otherwise the routable set is
+// cleared until the next success (FR-002).
+func (m *Manager) Refresh(ctx context.Context) error {
 	if m.client == nil {
 		// Only direct construction can produce a nil host client
 		// (production always wires the bridge); fail loudly through the
@@ -191,12 +149,9 @@ func (m *Manager) Refresh(ctx context.Context, apiKey string) error {
 		return m.fail("host client unavailable")
 	}
 	req := pluginapi.HTTPRequest{
-		Method: http.MethodGet,
-		URL:    m.cfg.CatalogURL,
-		Headers: http.Header{
-			"Authorization": []string{"Bearer " + apiKey},
-			"Accept":        []string{"application/json"},
-		},
+		Method:  http.MethodGet,
+		URL:     m.cfg.ModelsDocURL,
+		Headers: http.Header{"Accept": []string{"text/html"}},
 	}
 	resp, err := m.client.Do(ctx, req)
 	if err != nil {
@@ -209,23 +164,11 @@ func (m *Manager) Refresh(ctx context.Context, apiKey string) error {
 	if resp.StatusCode != http.StatusOK {
 		return m.fail(fmt.Sprintf("http %d", resp.StatusCode))
 	}
-	var env struct {
-		Data json.RawMessage `json:"data"`
+	rows, err := parseDocTable(resp.Body)
+	if err != nil {
+		return m.fail(err.Error())
 	}
-	if err := json.Unmarshal(resp.Body, &env); err != nil {
-		return m.fail("invalid json")
-	}
-	var entries []rawModel
-	var warns []string
-	if env.Data == nil {
-		// Key ABSENCE is upstream shape drift, never an intended clear:
-		// clear like an empty plan (swap(nil)) but leave a diagnostic.
-		// A present-but-empty array stays silent (tested-intended state).
-		warns = append(warns, `upstream catalog response missing "data" field`)
-	} else if err := json.Unmarshal(env.Data, &entries); err != nil {
-		return m.fail("invalid json")
-	}
-	m.swap(entries, warns...)
+	m.swap(rows)
 	return nil
 }
 
@@ -242,33 +185,31 @@ func (m *Manager) fail(category string) error {
 	return fmt.Errorf("catalog refresh failed: %s", category)
 }
 
-// swap builds the new snapshot from decoded entries and installs it
-// atomically under the mutex (FR-010 dedup, arch §5 route priority).
-// extraWarns are caller-supplied snapshot diagnostics (e.g. decode-level
-// shape-drift notices) recorded alongside the per-entry ones.
-func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
-	models := make([]ModelRecord, 0, len(entries))
-	index := make(map[string]ModelRecord, len(entries)*2)
+// swap builds the new snapshot from docs rows and installs it atomically
+// under the mutex (FR-010 dedup).
+func (m *Manager) swap(rows []docRow) {
+	models := make([]ModelRecord, 0, len(rows))
+	index := make(map[string]ModelRecord, len(rows)*2)
 	var unsup []UnsupportedModel
 	var warns []string
-	warns = append(warns, extraWarns...)
-	seen := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		if e.ID == "" {
+	seen := make(map[string]bool, len(rows))
+	docURL, docErr := url.Parse(m.cfg.ModelsDocURL)
+	for _, r := range rows {
+		if r.ID == "" {
 			unsup = append(unsup, UnsupportedModel{Reason: "missing id"})
 			continue
 		}
-		if seen[e.ID] {
-			warns = append(warns, fmt.Sprintf("duplicate model %q ignored; keeping first occurrence", e.ID))
+		if seen[r.ID] {
+			warns = append(warns, fmt.Sprintf("duplicate model %q ignored; keeping first occurrence", r.ID))
 			continue
 		}
-		seen[e.ID] = true
-		route, endpoint, ok, warn := m.resolve(e)
-		if warn != "" {
-			warns = append(warns, warn)
-		}
+		seen[r.ID] = true
+		route, ok := packageRoutes[r.Package]
 		if !ok {
-			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: "no route determined"})
+			unsup = append(unsup, UnsupportedModel{
+				UpstreamID: r.ID,
+				Reason:     fmt.Sprintf("unsupported AI SDK package %q", r.Package),
+			})
 			continue
 		}
 		if !m.protocolEnabled(route) {
@@ -276,49 +217,36 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			// FR-002 reflects the flags it was built with until the next
 			// successful refresh.
 			unsup = append(unsup, UnsupportedModel{
-				UpstreamID: e.ID,
+				UpstreamID: r.ID,
 				Reason:     fmt.Sprintf("protocol %s disabled by config", route),
 			})
 			continue
 		}
-		if endpoint != "" && endpointEscapesBase(m.cfg.BaseURL, endpoint) {
-			// The joined URL must stay on the configured upstream
-			// authority. Override endpoints flow through here, so they
-			// cannot rewrite the URL host — e.g. "/v1@evil.com/x"
-			// against a bare-host base-url turns the base into userinfo
-			// and would send credentials/prompts to an attacker host
-			// (spec 05 §2 trust boundary).
+		if docErr != nil || !sameOrigin(docURL, r.Endpoint) {
+			// API keys and prompts go to this URL, so a docs row may only
+			// point back at the host serving the docs page (spec 05 §2
+			// trust boundary).
 			unsup = append(unsup, UnsupportedModel{
-				UpstreamID: e.ID,
-				Reason:     "resolved endpoint escapes the configured upstream host",
+				UpstreamID: r.ID,
+				Reason:     "endpoint is not on the docs host",
 			})
 			continue
 		}
-		if endpoint == "" {
-			endpoint = route.EndpointPath()
-		}
-		inputModes := firstNonEmpty(e.InputModes, e.InputModalities)
-		outputModes := firstNonEmpty(e.OutputModes, e.OutputModalities)
-		display := e.DisplayName
+		display := r.Name
 		if display == "" {
-			display = e.ID
+			display = r.ID
 		}
 		rec := ModelRecord{
-			PublicID:     config.PublicID(m.cfg, e.ID),
-			UpstreamID:   e.ID,
-			DisplayName:  display,
-			Protocol:     route,
-			EndpointPath: endpoint,
-			ContextLimit: e.ContextLength,
-			OutputLimit:  e.MaxOutputTokens,
-			InputModes:   inputModes,
-			OutputModes:  outputModes,
-			Thinking:     normalizeThinking(e.Thinking),
+			PublicID:    config.PublicID(m.cfg, r.ID),
+			UpstreamID:  r.ID,
+			DisplayName: display,
+			Protocol:    route,
+			UpstreamURL: r.Endpoint,
 		}
 		// With a prefix enabled, one record's PublicID can equal another
 		// record's UpstreamID (upstream "foo" and "opencode-go/foo" both
 		// claim index key "<prefix>/foo"); last-write-wins would silently
-		// misroute. First in catalog order wins (same dedup rule as
+		// misroute. First in table order wins (same dedup rule as
 		// duplicate IDs); the later record is excluded. Same-role clashes
 		// are impossible — distinct upstream IDs and an injective public
 		// mapping — so the slot owner always holds the key via its other
@@ -326,13 +254,13 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		if other, ok := index[rec.PublicID]; ok {
 			reason := fmt.Sprintf("public id %q collides with upstream id %q", rec.PublicID, other.UpstreamID)
 			warns = append(warns, reason)
-			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: reason})
+			unsup = append(unsup, UnsupportedModel{UpstreamID: r.ID, Reason: reason})
 			continue
 		}
 		if other, ok := index[rec.UpstreamID]; ok {
 			reason := fmt.Sprintf("public id %q collides with upstream id %q", other.PublicID, rec.UpstreamID)
 			warns = append(warns, reason)
-			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: reason})
+			unsup = append(unsup, UnsupportedModel{UpstreamID: r.ID, Reason: reason})
 			continue
 		}
 		models = append(models, rec)
@@ -341,7 +269,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.raw, m.models, m.index, m.unsup, m.warns = entries, models, index, unsup, warns
+	m.raw, m.models, m.index, m.unsup, m.warns = rows, models, index, unsup, warns
 }
 
 // protocolEnabled reports whether the resolved route's protocol flag is on
@@ -358,82 +286,18 @@ func (m *Manager) protocolEnabled(r Route) bool {
 	return true
 }
 
-// resolve applies route priority strictly: user override, compatibility
-// table (family prefix), none (arch §5).
-func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
-	if o, ok := m.cfg.RouteOverrides[e.ID]; ok {
-		// Spec 04 §5: an override MUST be visible in diagnostics. Load
-		// validation (spec 04 §6) guarantees a known protocol, so the
-		// map lookup above is the only decision point here.
-		return Route(o.Protocol), o.Endpoint, true, fmt.Sprintf(
-			"model %q routed via user override (%s %s)", e.ID, o.Protocol, o.Endpoint)
-	}
-	id := strings.ToLower(e.ID)
-	for _, p := range prefixRoutes {
-		if strings.HasPrefix(id, p.prefix) {
-			return p.route, "", true, ""
-		}
-	}
-	return "", "", false, ""
-}
-
-// JoinUpstreamURL joins the configured base-url onto an endpoint path and
-// is the single source of truth for that join (spec 05 §2): base-url is the
-// unversioned inference root (default .../inference/go) and endpoints carry
-// their protocol prefix and version (/openai/v1/..., /anthropic/v1/...). The
-// authority-escape check (endpointEscapesBase) must parse exactly the URL
-// this produces — two independent join formulas would be free to drift
-// apart and validate one URL while sending another.
-func JoinUpstreamURL(baseURL, endpoint string) string {
-	return strings.TrimSuffix(baseURL, "/") + endpoint
-}
-
-// endpointEscapesBase reports whether joining baseURL with endpoint via
-// JoinUpstreamURL would send the request to a different authority or scheme
-// than the configured base-url. Any parse failure counts as escaping (fail
-// closed).
-func endpointEscapesBase(baseURL, endpoint string) bool {
-	base, err := url.Parse(baseURL)
+// sameOrigin reports whether endpoint parses to an absolute URL with doc's
+// scheme and host, and carries no userinfo, query, or fragment. Any parse
+// failure counts as foreign (fail closed).
+func sameOrigin(doc *url.URL, endpoint string) bool {
+	u, err := url.Parse(endpoint)
 	if err != nil {
-		return true
+		return false
 	}
-	got, err := url.Parse(JoinUpstreamURL(baseURL, endpoint))
-	if err != nil {
-		return true
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
 	}
-	return !strings.EqualFold(got.Host, base.Host) || got.Scheme != base.Scheme
-}
-
-func firstNonEmpty(a, b []string) []string {
-	if len(a) > 0 {
-		return a
-	}
-	return b
-}
-
-// normalizeThinking converts the decoded raw thinking object into its
-// pluginapi form; absent objects yield nil, partial ones a partial struct.
-func normalizeThinking(rt *rawThinking) *pluginapi.ThinkingSupport {
-	if rt == nil {
-		return nil
-	}
-	t := &pluginapi.ThinkingSupport{}
-	if rt.Min != nil {
-		t.Min = *rt.Min
-	}
-	if rt.Max != nil {
-		t.Max = *rt.Max
-	}
-	if rt.ZeroAllowed != nil {
-		t.ZeroAllowed = *rt.ZeroAllowed
-	}
-	if rt.DynamicAllowed != nil {
-		t.DynamicAllowed = *rt.DynamicAllowed
-	}
-	if len(rt.Levels) > 0 {
-		t.Levels = append([]string(nil), rt.Levels...)
-	}
-	return t
+	return u.Scheme == doc.Scheme && strings.EqualFold(u.Host, doc.Host)
 }
 
 // Models returns the routable snapshot (FR-003 identity fields). The slice

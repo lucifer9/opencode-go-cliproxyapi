@@ -25,11 +25,11 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(minimal) failed: %v", err)
 	}
-	if c.BaseURL != "https://opencode.ai/inference/go" {
-		t.Errorf("BaseURL = %q", c.BaseURL)
+	if c.ModelsDocURL != "https://opencode.ai/v2/docs/console/go" {
+		t.Errorf("ModelsDocURL = %q", c.ModelsDocURL)
 	}
-	if c.CatalogURL != "https://opencode.ai/inference/go/v1/models" {
-		t.Errorf("CatalogURL = %q", c.CatalogURL)
+	if c.UsageURL != "https://opencode.ai/inference/go/v1/usage" {
+		t.Errorf("UsageURL = %q", c.UsageURL)
 	}
 	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "opencode-go" {
 		t.Errorf("ModelPrefix = %+v", c.ModelPrefix)
@@ -62,8 +62,8 @@ func TestLoadFullConfigHonorsEveryField(t *testing.T) {
 	doc := `
 enabled: true
 future-key: 1
-base-url: http://localhost:9090/v1
-catalog-url: https://example.com/models
+models-doc-url: http://localhost:9090/docs/go
+usage-url: https://example.com/v1/usage
 model-prefix:
   enabled: true
   value: myprefix
@@ -76,10 +76,6 @@ protocols:
   chat-completions: false
   messages: false
   responses: false
-route-overrides:
-  gpt-5.6-luna:
-    protocol: responses
-    endpoint: /v1/responses
 allow-http: true
 request-timeout: 5m
 max-response-bytes: 1024
@@ -88,11 +84,11 @@ max-response-bytes: 1024
 	if err != nil {
 		t.Fatalf("Load(full) failed: %v", err)
 	}
-	if c.BaseURL != "http://localhost:9090/v1" {
-		t.Errorf("BaseURL = %q", c.BaseURL)
+	if c.ModelsDocURL != "http://localhost:9090/docs/go" {
+		t.Errorf("ModelsDocURL = %q", c.ModelsDocURL)
 	}
-	if c.CatalogURL != "https://example.com/models" {
-		t.Errorf("CatalogURL = %q", c.CatalogURL)
+	if c.UsageURL != "https://example.com/v1/usage" {
+		t.Errorf("UsageURL = %q", c.UsageURL)
 	}
 	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "myprefix" {
 		t.Errorf("ModelPrefix = %+v", c.ModelPrefix)
@@ -108,10 +104,6 @@ max-response-bytes: 1024
 	}
 	if c.Protocols.ChatCompletions || c.Protocols.Messages || c.Protocols.Responses {
 		t.Errorf("Protocols = %+v", c.Protocols)
-	}
-	o, ok := c.RouteOverrides["gpt-5.6-luna"]
-	if !ok || o.Protocol != "responses" || o.Endpoint != "/v1/responses" {
-		t.Errorf("RouteOverrides = %+v", c.RouteOverrides)
 	}
 	if !c.AllowHTTP {
 		t.Errorf("AllowHTTP = false")
@@ -143,35 +135,19 @@ func TestLoadIgnoresRemovedSchedulerFields(t *testing.T) {
 	}
 }
 
-func TestLoadDerivedCatalogURLFromCustomBase(t *testing.T) {
-	c, err := Load([]byte("base-url: https://upstream.example.com/api\n" + withKey))
+// Routing now comes from the docs page; configs written for the old
+// base-url/catalog-url/route-overrides keys still load, with those keys
+// ignored like any other unknown field.
+func TestLoadIgnoresRemovedRoutingFields(t *testing.T) {
+	doc := "base-url: https://opencode.ai/zen/go/v1\n" +
+		"catalog-url: https://opencode.ai/zen/go/v1/models\n" +
+		"route-overrides:\n  m:\n    protocol: grpc\n    endpoint: x\n" + withKey
+	c, err := Load([]byte(doc))
 	if err != nil {
-		t.Fatalf("Load failed: %v", err)
+		t.Fatalf("removed routing fields must be ignored: %v", err)
 	}
-	if c.CatalogURL != "https://upstream.example.com/api/v1/models" {
-		t.Errorf("CatalogURL = %q", c.CatalogURL)
-	}
-}
-
-func TestLoadDerivedCatalogURLTrimsTrailingSlash(t *testing.T) {
-	c, err := Load([]byte("base-url: https://opencode.ai/inference/go/\n" + withKey))
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-	if c.CatalogURL != "https://opencode.ai/inference/go/v1/models" {
-		t.Errorf("CatalogURL = %q, want no double slash", c.CatalogURL)
-	}
-}
-
-// An EXPLICIT catalog-url ending in "/" must normalize the same way as the
-// derived default, so the stored endpoint never carries a trailing slash.
-func TestLoadExplicitCatalogURLTrimsTrailingSlash(t *testing.T) {
-	c, err := Load([]byte("catalog-url: https://mirror.example.com/api/models///\n" + withKey))
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-	if c.CatalogURL != "https://mirror.example.com/api/models" {
-		t.Errorf("CatalogURL = %q, want trailing slashes trimmed", c.CatalogURL)
+	if c.ModelsDocURL != DefaultModelsDocURL || c.UsageURL != DefaultUsageURL {
+		t.Errorf("defaults not applied: %q %q", c.ModelsDocURL, c.UsageURL)
 	}
 }
 
@@ -213,10 +189,8 @@ func TestLoadRejections(t *testing.T) {
 		{"keyless config rejected", "", "api-keys: at least one key is required"},
 		{"request-timeout zero rejected", "request-timeout: 0s\n" + withKey, "request-timeout: must be positive"},
 		{
-			"duplicate route-override keys",
-			"route-overrides:\n" +
-				"  gpt-5.6-luna:\n    protocol: responses\n    endpoint: /v1/responses\n" +
-				"  gpt-5.6-luna:\n    protocol: messages\n    endpoint: /v1/messages\n",
+			"duplicate mapping keys",
+			"protocols:\n  messages: true\n  messages: false\n",
 			"decode config: invalid YAML structure near line",
 		},
 		{
@@ -229,41 +203,26 @@ func TestLoadRejections(t *testing.T) {
 			"api-keys:\n  - value: literal-ok\n  - value: ${TEST_OG_DEFINITELY_UNSET_VAR}\n",
 			"api-keys[1].value: expanded to empty",
 		},
-		{"explicitly empty base-url", `base-url: ""`, "base-url: must not be empty"},
-		{"explicitly empty catalog-url", `catalog-url: ""`, "catalog-url: must not be empty"},
-		{"malformed base-url", `base-url: "::::"`, "base-url: invalid URL"},
-		{"scheme-less base-url", "base-url: opencode.ai/inference/go", "base-url: invalid URL"},
-		{"malformed catalog-url", `catalog-url: "http://exa mple.com"`, "catalog-url: invalid URL"},
-		{"http base-url without allow-http", "base-url: http://localhost:9090/v1", "base-url: http scheme requires allow-http"},
-		{"http catalog-url without allow-http", "catalog-url: http://localhost:9090/models", "catalog-url: http scheme requires allow-http"},
-		{"ftp base-url", "base-url: ftp://files.example.com/v1", `base-url: unsupported scheme "ftp"`},
-		{"file catalog-url", "catalog-url: file://host/share/models", `catalog-url: unsupported scheme "file"`},
-		{"ftp base-url with allow-http", "allow-http: true\nbase-url: ftp://files.example.com/v1", `base-url: unsupported scheme "ftp"`},
-		{"file catalog-url with allow-http", "allow-http: true\ncatalog-url: file://host/share/models", `catalog-url: unsupported scheme "file"`},
+		{"explicitly empty models-doc-url", `models-doc-url: ""`, "models-doc-url: must not be empty"},
+		{"explicitly empty usage-url", `usage-url: ""`, "usage-url: must not be empty"},
+		{"malformed models-doc-url", `models-doc-url: "::::"`, "models-doc-url: invalid URL"},
+		{"scheme-less models-doc-url", "models-doc-url: opencode.ai/v2/docs/console/go", "models-doc-url: invalid URL"},
+		{"malformed usage-url", `usage-url: "http://exa mple.com"`, "usage-url: invalid URL"},
+		{"http models-doc-url without allow-http", "models-doc-url: http://localhost:9090/v1", "models-doc-url: http scheme requires allow-http"},
+		{"http usage-url without allow-http", "usage-url: http://localhost:9090/v1/usage", "usage-url: http scheme requires allow-http"},
+		{"ftp models-doc-url", "models-doc-url: ftp://files.example.com/v1", `models-doc-url: unsupported scheme "ftp"`},
+		{"file usage-url", "usage-url: file://host/share/usage", `usage-url: unsupported scheme "file"`},
+		{"ftp models-doc-url with allow-http", "allow-http: true\nmodels-doc-url: ftp://files.example.com/v1", `models-doc-url: unsupported scheme "ftp"`},
+		{"file usage-url with allow-http", "allow-http: true\nusage-url: file://host/share/usage", `usage-url: unsupported scheme "file"`},
 		{"refresh-interval missing unit", "catalog:\n  refresh-interval: 5\n", "catalog.refresh-interval: invalid duration"},
 		{"refresh-interval negative", "catalog:\n  refresh-interval: -5m\n" + withKey, "catalog.refresh-interval: must be at least 1m"},
 		{"refresh-interval below floor", "catalog:\n  refresh-interval: 1ms\n" + withKey, "catalog.refresh-interval: must be at least 1m"},
 		{"request-timeout unparsable", "request-timeout: bogus\n", "request-timeout: invalid duration"},
 		{"request-timeout explicitly empty", `request-timeout: ""`, "request-timeout: invalid duration"},
 		{"request-timeout zero rejected", "request-timeout: 0s\n" + withKey, "request-timeout: must be positive"},
-		{"userinfo credentials never echoed", "base-url: https://user:sekret@/v1", "base-url: invalid URL https://"},
+		{"userinfo credentials never echoed", "models-doc-url: https://user:sekret@/v1", "models-doc-url: invalid URL https://"},
 		{"max-response-bytes zero rejected", "max-response-bytes: 0\n" + withKey, "max-response-bytes: must be positive"},
 		{"max-response-bytes negative rejected", "max-response-bytes: -5\n" + withKey, "max-response-bytes: must be positive"},
-		{
-			"override unsupported protocol",
-			"route-overrides:\n  bad-model:\n    protocol: grpc\n    endpoint: /v1/x\n" + withKey,
-			"route-overrides[bad-model].protocol: unsupported protocol",
-		},
-		{
-			"override empty endpoint",
-			"route-overrides:\n  bad-model:\n    protocol: responses\n    endpoint: \"\"\n" + withKey,
-			"route-overrides[bad-model].endpoint: must not be empty",
-		},
-		{
-			"override endpoint without leading slash",
-			"route-overrides:\n  bad-model:\n    protocol: responses\n    endpoint: v1/x\n" + withKey,
-			"route-overrides[bad-model].endpoint: must start with /",
-		},
 		{"prefix enabled empty value", "model-prefix:\n  enabled: true\n  value: \"\"\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
 		{"prefix with space", "model-prefix:\n  value: has space\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
 		{"prefix leading dash", "model-prefix:\n  value: -lead\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
@@ -290,7 +249,7 @@ func TestLoadErrorsNeverLeakDecodedValues(t *testing.T) {
 	}{
 		{"bare-scalar api key", "api-keys:\n  - sk-live-supersecret-42\n", "sk-live-supersecret-42"},
 		{"duplicate api key values", "api-keys:\n  - value: sk-live-dupsecret-7\n  - value: sk-live-dupsecret-7\n", "sk-live-dupsecret-7"},
-		{"userinfo credentials", "base-url: https://admin:p4ssw0rd@/v1\n", "p4ssw0rd"},
+		{"userinfo credentials", "usage-url: https://admin:p4ssw0rd@/v1\n", "p4ssw0rd"},
 	}
 	for _, tc := range cases {
 		_, err := Load([]byte(tc.yaml))
@@ -303,10 +262,9 @@ func TestLoadErrorsNeverLeakDecodedValues(t *testing.T) {
 	}
 }
 
-// TestValidateURLRejectsQueryFragmentUserinfo pins the fix for bases that
-// parse fine but break JoinUpstreamURL: a query or fragment truncates the
-// joined path (…/v1?tenant=x/chat/completions), and userinfo leaks
-// credentials into every upstream request URL.
+// TestValidateURLRejectsQueryFragmentUserinfo pins that configured URLs are
+// plain locations: a query or fragment changes what is fetched, and
+// userinfo would leak credentials into every request URL.
 func TestValidateURLRejectsQueryFragmentUserinfo(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -314,7 +272,7 @@ func TestValidateURLRejectsQueryFragmentUserinfo(t *testing.T) {
 		httpOK  bool
 		wantErr string
 	}{
-		{"query rejected naming setting", "https://host/v1?tenant=x", false, "base-url: must not contain query"},
+		{"query rejected naming setting", "https://host/v1?tenant=x", false, "usage-url: must not contain query"},
 		{"fragment rejected", "https://host/v1#frag", false, "must not contain query, fragment, or userinfo"},
 		{"userinfo rejected without echoing credentials", "https://user:key@host/v1", false, "must not contain query, fragment, or userinfo"},
 		{"clean https passes", "https://host/v1", false, ""},
@@ -322,7 +280,7 @@ func TestValidateURLRejectsQueryFragmentUserinfo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateURL("base-url", tt.raw, tt.httpOK)
+			err := validateURL("usage-url", tt.raw, tt.httpOK)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validateURL(%q) = %v, want nil", tt.raw, err)

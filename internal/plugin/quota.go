@@ -28,7 +28,7 @@ func (m *Manager) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchReques
 		return empty, fmt.Errorf("quota credential has no API key")
 	}
 	m.mu.RLock()
-	baseURL, timeout := m.cfg.BaseURL, m.cfg.RequestTimeout
+	usageURL, timeout := m.cfg.UsageURL, m.cfg.RequestTimeout
 	m.mu.RUnlock()
 	if m.bridge == nil {
 		return empty, fmt.Errorf("quota bridge unavailable")
@@ -38,7 +38,7 @@ func (m *Manager) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchReques
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: strings.TrimRight(baseURL, "/") + "/v1/usage", Headers: http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}})
+	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: usageURL, Headers: http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}})
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return empty, fmt.Errorf("quota upstream request failed")
 	}

@@ -20,12 +20,9 @@ import (
 	"opencode-go-cliproxyapi/internal/errclass"
 )
 
+var multiRouteCatalog = docPage(testDocBase, chatModel("glm-5.3"), msgModel("minimax-m3"), respModel("gpt-5.6-luna"))
+
 const (
-	multiRouteCatalog = `{"data":[
-		{"id":"glm-5.3"},
-		{"id":"minimax-m3"},
-		{"id":"gpt-5.6-luna"}
-	]}`
 	ccRequestBody        = `{"model":"whatever","messages":[{"role":"user","content":"hi"}]}`
 	ccResponseBody       = `{"id":"r1","model":"glm-5.3","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`
 	claudeRequestBody    = `{"model":"x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
@@ -140,14 +137,14 @@ func upstreamRouter(t *testing.T, bodies map[string]string) func(string, []byte)
 	}
 }
 
-// wrapWithCatalog answers catalog fetches (/models) itself and delegates
+// wrapWithCatalog answers docs-page catalog fetches itself and delegates
 // everything else to next.
 func wrapWithCatalog(catalogBody string, next func(string, []byte) ([]byte, error)) func(string, []byte) ([]byte, error) {
 	return func(method string, payload []byte) ([]byte, error) {
 		var wire map[string]any
 		_ = json.Unmarshal(payload, &wire)
 		if method == pluginabi.MethodHostHTTPDo {
-			if url, _ := wire["url"].(string); strings.HasSuffix(url, "/models") {
+			if url, _ := wire["url"].(string); isDocFetch(url) {
 				return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(catalogBody)}), nil
 			}
 		}
@@ -372,7 +369,7 @@ func TestExecutorSessionInputsPropagateInBothModes(t *testing.T) {
 }
 
 func TestExecuteChatRoute(t *testing.T) {
-	f := &fakeCaller{responder: wrapWithCatalog(testCatalogJSON, upstreamRouter(t, map[string]string{
+	f := &fakeCaller{responder: wrapWithCatalog(testCatalogDoc, upstreamRouter(t, map[string]string{
 		"/v1/chat/completions": ccResponseBody,
 	}))}
 	m := NewManager(NewHostBridge(f.call))
@@ -815,7 +812,7 @@ func TestExecuteStream4xxWatchdogUnblocksStalledRead(t *testing.T) {
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
-	f.responder = wrapWithCatalog(testCatalogJSON, func(method string, payload []byte) ([]byte, error) {
+	f.responder = wrapWithCatalog(testCatalogDoc, func(method string, payload []byte) ([]byte, error) {
 		switch method {
 		case pluginabi.MethodHostHTTPDoStream:
 			return hostOK(hostStreamStartResp{StatusCode: http.StatusBadRequest, StreamID: "up-stall"}), nil
@@ -1002,7 +999,7 @@ func TestExecuteStreamExceedsMaxResponseBytes(t *testing.T) {
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
-	tinyCatalog := `{"data":[{"id":"glm-5.4"}]}`
+	tinyCatalog := docPage(testDocBase, chatModel("glm-5.4"))
 	frame := `data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"` +
 		strings.Repeat("x", 60) + `"}]}` + "\n\n"
 	script := streamScript{upstreamID: "up-cap", frames: []string{frame, frame}}
@@ -1037,7 +1034,7 @@ func TestExecuteStreamWatchdogClosesIdleUpstream(t *testing.T) {
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
-	tinyCatalog := `{"data":[{"id":"glm-5.4"}]}`
+	tinyCatalog := docPage(testDocBase, chatModel("glm-5.4"))
 	var once sync.Once
 	idle := make(chan struct{})
 	f.responder = wrapWithCatalog(tinyCatalog, func(method string, payload []byte) ([]byte, error) {
@@ -1296,7 +1293,7 @@ func TestExecutorIdentifierAndCountTokens(t *testing.T) {
 }
 
 func TestRegistrationCapabilitiesIncludeExecutor(t *testing.T) {
-	m, _ := newTestManager(catalogResponder(true, testCatalogJSON))
+	m, _ := newTestManager(catalogResponder(true, testCatalogDoc))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
 	if err != nil {
@@ -1330,7 +1327,7 @@ func TestExecuteMaxResponseBytesGuard(t *testing.T) {
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	// The cap also applies to catalog fetches, so keep the catalog tiny and
 	// make only the upstream completion body exceed it.
-	tinyCatalog := `{"data":[{"id":"glm-5.4"}]}`
+	tinyCatalog := docPage(testDocBase, chatModel("glm-5.4"))
 	bigBody := `{"id":"r2","choices":[{"index":0,"message":{"role":"assistant","content":"` +
 		strings.Repeat("x", 150) + `"},"finish_reason":"stop"}]}`
 	f.responder = wrapWithCatalog(tinyCatalog, upstreamRouter(t, map[string]string{
@@ -1350,7 +1347,7 @@ func TestExecuteTransportErrorClassified(t *testing.T) {
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
-	f.responder = wrapWithCatalog(testCatalogJSON, func(method string, _ []byte) ([]byte, error) {
+	f.responder = wrapWithCatalog(testCatalogDoc, func(method string, _ []byte) ([]byte, error) {
 		if method == pluginabi.MethodHostAuthList {
 			return hostOK(map[string]any{}), nil
 		}
@@ -1374,12 +1371,9 @@ func TestConvertNonStreamSeamBranches(t *testing.T) {
 		eErr.Class != errclass.ClassTranslation {
 		t.Fatalf("unknown route = %v", eErr)
 	}
-	if _, eErr := buildUpstreamRequest(catalog.Route("weird"), "m", "openai", nil, nil); eErr == nil ||
+	if _, eErr := buildUpstreamRequest(catalog.Route("weird"), "m", "openai", nil); eErr == nil ||
 		eErr.Class != errclass.ClassTranslation {
 		t.Fatalf("unknown route build = %v", eErr)
-	}
-	if got := catalog.JoinUpstreamURL("https://gw.test/", "/openai/v1/responses"); got != "https://gw.test/openai/v1/responses" {
-		t.Fatalf("url join = %q", got)
 	}
 	if got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session"); got.Get("Authorization") != "Bearer k" || got.Get("x-opencode-session") != "session" {
 		t.Fatalf("bearer headers = %v", got)
@@ -1417,7 +1411,7 @@ func TestExecuteMalformedUpstreamStatusUsesSelectedKey(t *testing.T) {
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	var seen []string
-	f.responder = wrapWithCatalog(testCatalogJSON, func(method string, _ []byte) ([]byte, error) {
+	f.responder = wrapWithCatalog(testCatalogDoc, func(method string, _ []byte) ([]byte, error) {
 		if method != pluginabi.MethodHostHTTPDo {
 			return hostOK(map[string]any{}), nil
 		}
@@ -1564,7 +1558,7 @@ func TestExecuteStreamInvalidAuthRejection(t *testing.T) {
 
 func TestExecuteUsesSelectedAuthKeyWithoutFallback(t *testing.T) {
 	customKey := "sk-cpa-selected-unique-key"
-	f := &fakeCaller{responder: wrapWithCatalog(testCatalogJSON, upstreamRouter(t, map[string]string{
+	f := &fakeCaller{responder: wrapWithCatalog(testCatalogDoc, upstreamRouter(t, map[string]string{
 		"/v1/chat/completions": ccResponseBody,
 	}))}
 	m := NewManager(NewHostBridge(f.call))

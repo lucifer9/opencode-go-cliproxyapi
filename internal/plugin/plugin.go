@@ -195,14 +195,14 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Description: "List of OpenCode Go API keys (`- value: ...`, optional `name: Personal`). Supports ${ENV_VAR} expansion.",
 		},
 		{
-			Name:        "base-url",
+			Name:        "models-doc-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Upstream base URL (default: https://opencode.ai/inference/go).",
+			Description: "OpenCode Go docs page whose Endpoints table defines models and routes (default: https://opencode.ai/v2/docs/console/go).",
 		},
 		{
-			Name:        "catalog-url",
+			Name:        "usage-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Optional catalog discovery URL (default: {base-url}/v1/models).",
+			Description: "Quota usage URL (default: https://opencode.ai/inference/go/v1/usage).",
 		},
 		{
 			Name:        "model-prefix",
@@ -218,11 +218,6 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Name:        "protocols",
 			Type:        pluginapi.ConfigFieldTypeObject,
 			Description: "Protocol enable/disable switches (`chat-completions: bool`, `messages: bool`, `responses: bool`).",
-		},
-		{
-			Name:        "route-overrides",
-			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Explicit route overrides per model (`<model-id>: {protocol: string, endpoint: string}`).",
 		},
 		{
 			Name:        "request-timeout",
@@ -293,7 +288,7 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 		client = m.bridge
 	}
 	mgr := catalog.New(cfg, client)
-	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout, cfg)
+	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout)
 	debugTrace("lifecycle refresh_complete model_count=%d refresh_error=%t", len(mgr.Models()), refreshErr != nil)
 
 	// Retire any running loop and wait for its exit outside m.mu: a mid-refresh
@@ -307,8 +302,8 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	m.cfg = cfg
 	// FR-002 stale-while-unavailable: a failed refresh must neither wipe a
 	// non-empty previous snapshot nor keep the OLD manager, whose stored cfg
-	// would pin the old base-url/catalog-url/protocols/prefix so ticks
-	// fetched the old URL with the new config's keys forever (F5). The NEW
+	// would pin the old models-doc-url/protocols/prefix so ticks fetched
+	// the old URL with the new config forever (F5). The NEW
 	// manager is adopted unconditionally; when a previous snapshot exists
 	// AND the NEW config keeps stale-while-unavailable enabled, it is
 	// seeded into the new one, so serving is unchanged until the next
@@ -417,15 +412,10 @@ func (m *Manager) handleModels() ([]byte, error) {
 	if mgr != nil {
 		for _, rec := range mgr.Models() {
 			models = append(models, pluginapi.ModelInfo{
-				ID:                        rec.PublicID,
-				Object:                    "model",
-				OwnedBy:                   ProviderID,
-				DisplayName:               rec.DisplayName,
-				ContextLength:             rec.ContextLimit,
-				MaxCompletionTokens:       rec.OutputLimit,
-				SupportedInputModalities:  rec.InputModes,
-				SupportedOutputModalities: rec.OutputModes,
-				Thinking:                  rec.Thinking,
+				ID:          rec.PublicID,
+				Object:      "model",
+				OwnedBy:     ProviderID,
+				DisplayName: rec.DisplayName,
 			})
 		}
 	}
@@ -493,7 +483,7 @@ func (m *Manager) startRefreshLoop(cfg config.Config, mgr *catalog.Manager, inte
 							_ = m.bridge.Log("error", "catalog refresh panicked", nil)
 						}
 					}()
-					refreshOnce(stopCtx, mgr, m.bridge, cfg.RequestTimeout, cfg)
+					refreshOnce(stopCtx, mgr, m.bridge, cfg.RequestTimeout)
 				}()
 			}
 		}
@@ -523,12 +513,10 @@ func (m *Manager) closeStop() chan struct{} {
 // plus the full request-timeout, so close(stop) aborts an in-flight tick
 // (F4). On failure it logs a warn via host.log — error text is a redacted
 // category label from the catalog package, never key material (FR-011).
-func refreshOnce(parent context.Context, mgr *catalog.Manager, bridge *HostBridge, timeout time.Duration, cfg config.Config) error {
-	// Fallback: configured materialization input is catalog-only; CPA client
-	// authentication remains owned by its AuthProvider and CPA.
+func refreshOnce(parent context.Context, mgr *catalog.Manager, bridge *HostBridge, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	err := mgr.Refresh(ctx, cfg.APIKeys[0].Value)
+	err := mgr.Refresh(ctx)
 	if err != nil {
 		if bridge != nil {
 			_ = bridge.Log("warn", "catalog refresh failed", map[string]any{"error": err.Error()})

@@ -1,8 +1,13 @@
 ## What's Changed
 
+### Features
+
+- Read models and routes from the Endpoints table of the OpenCode Go docs page (`https://opencode.ai/v2/docs/console/go`). Each row's AI SDK package selects the protocol and its URL is used as-is, so new models work without a plugin update. Rows that point off the docs host, or use a package without an adapter, are excluded and logged.
+
 ### Bug Fixes
 
-- Move upstream calls to the OpenCode Go inference API (`https://opencode.ai/inference/go`): Chat Completions and Responses use `/openai/v1/...`, Messages uses `/anthropic/v1/messages`, and the catalog and quota use `/v1/models` and `/v1/usage`.
+- Move upstream calls to the OpenCode Go inference API (`https://opencode.ai/inference/go`): Chat Completions and Responses use `/openai/v1/...`, Messages uses `/anthropic/v1/messages`, and quota uses `/v1/usage`.
+- Route `claude-haiku-5-5`, `space-bunny`, `step-5-preview`, and `beam-free`, which the old built-in family table missed.
 
 - Preserve Claude image tool results when routing to Chat Completions: retain images in an associated user message after tool replies, preserve text, tool references and error markers, and include images in session derivation. The selected upstream model must support image input.
 
@@ -14,9 +19,9 @@ Special thanks to @SpiGAndromeda in #14.
 
 ## Upgrade Notes
 
-If your config sets `base-url: https://opencode.ai/zen/go/v1`, change it to `https://opencode.ai/inference/go` or remove it to use the default.
-The old value is no longer supported and produces wrong upstream paths.
-Route override endpoints are now appended to `base-url` as-is, so write them with the protocol prefix (for example `/anthropic/v1/messages`).
+The `base-url`, `catalog-url`, and `route-overrides` options are removed and ignored if present.
+Use `models-doc-url` and `usage-url` only to point at a mirror; the defaults need no configuration.
+Models no longer publish context length, modality, or thinking metadata, because the docs table does not provide it (the live `/v1/models` never did either).
 
 - Replace the old plugin binary with the new release binary.
 - Restart CLIProxyAPI after replacing the plugin.

@@ -147,13 +147,9 @@ func (b *forwardingBridge) call(method string, payload []byte) ([]byte, error) {
 	}
 }
 
-// integrationCatalog is the documented tolerant catalog JSON: no protocol
-// hints, so the built-in compatibility table routes every entry.
-const integrationCatalog = `{"data":[` +
-	`{"id":"glm-5.2"},` +
-	`{"id":"gpt-5.6-luna"},` +
-	`{"id":"qwen3.7-max"}` +
-	`]}`
+// integrationCatalog is the docs-table model set the mock server publishes,
+// one model per route; rows point at the mock server itself.
+var integrationCatalog = []docModel{chatModel("glm-5.2"), respModel("gpt-5.6-luna"), msgModel("qwen3.7-max")}
 
 const integrationCompletion = `{"id":"chatcmpl-1","object":"chat.completion","model":"glm-5.2",` +
 	`"choices":[{"index":0,"message":{"role":"assistant","content":"sunny","tool_calls":[` +
@@ -209,7 +205,7 @@ type mockOpenCode struct {
 	mu                   sync.Mutex
 	srv                  *httptest.Server
 	catalogDown          bool
-	catalogBody          string
+	catalogModels        []docModel
 	messagesBody         string
 	responsesBody        string
 	lastPath             string
@@ -230,18 +226,18 @@ type mockOpenCode struct {
 
 func newMockOpenCode(t *testing.T) *mockOpenCode {
 	t.Helper()
-	st := &mockOpenCode{catalogBody: integrationCatalog, messagesBody: integrationMessages, responsesBody: integrationResponses}
+	st := &mockOpenCode{catalogModels: integrationCatalog, messagesBody: integrationMessages, responsesBody: integrationResponses}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/docs/go", func(w http.ResponseWriter, _ *http.Request) {
 		st.mu.Lock()
-		down, body := st.catalogDown, st.catalogBody
+		down, models := st.catalogDown, st.catalogModels
 		st.mu.Unlock()
 		if down {
 			http.Error(w, "catalog unavailable", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(body))
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(docPage(st.srv.URL, models...)))
 	})
 	mux.HandleFunc("/openai/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -291,17 +287,6 @@ func newMockOpenCode(t *testing.T) *mockOpenCode {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(respBody))
 	})
-	mux.HandleFunc("/v1/messages-override", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		st.mu.Lock()
-		st.lastMessagesAuth = r.Header.Get("x-api-key")
-		st.lastMessagesVersion = r.Header.Get("Anthropic-Version")
-		st.lastMessagesSession = r.Header.Get("x-opencode-session")
-		st.lastMessagesBody = body
-		st.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(st.messagesBody))
-	})
 	mux.HandleFunc("/openai/v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
@@ -332,9 +317,9 @@ func (st *mockOpenCode) setCatalogDown(down bool) {
 	st.mu.Unlock()
 }
 
-func (st *mockOpenCode) setCatalogBody(body string) {
+func (st *mockOpenCode) setCatalogModels(models ...docModel) {
 	st.mu.Lock()
-	st.catalogBody = body
+	st.catalogModels = models
 	st.mu.Unlock()
 }
 
@@ -386,9 +371,9 @@ func (st *mockOpenCode) chatRequest(t *testing.T) (path, auth string, body map[s
 }
 
 func integrationYAML(baseURL string) string {
-	// The mock server root plays the inference base (.../inference/go), so
-	// /v1/models and the protocol-prefixed endpoints line up with the mux.
-	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n", baseURL)
+	// The mock server serves the docs page and every endpoint it lists, so
+	// docs rows stay on the docs host.
+	return fmt.Sprintf("models-doc-url: %s/docs/go\nallow-http: true\napi-keys:\n  - value: sk-test-1\n", baseURL)
 }
 
 // newIntegrationManager registers a manager whose outbound calls flow
@@ -421,14 +406,14 @@ func integrationStaticIDs(t *testing.T, m *Manager) map[string]pluginapi.ModelIn
 	return byID
 }
 
-// TestRegisterAndDiscover covers AC §A: one provider, /v1/models discovery
-// through the compatibility table, stable prefixed public IDs with intact
+// TestRegisterAndDiscover covers AC §A: one provider, docs-page discovery
+// routed by AI SDK package, stable prefixed public IDs with intact
 // upstream mapping, schema_version 3, model_provider+executor capabilities.
 func TestRegisterAndDiscover(t *testing.T) {
-	m, f, _, _ := newIntegrationManager(t)
+	m, f, _, yamlText := newIntegrationManager(t)
 
 	var reg registrationResult
-	decodeResult(t, mustHandle(t, m, "plugin.register", lifecycleRequestBody(integrationYAML("http://unused.invalid"))), &reg)
+	decodeResult(t, mustHandle(t, m, "plugin.register", lifecycleRequestBody(yamlText)), &reg)
 	if reg.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
@@ -454,8 +439,8 @@ func TestRegisterAndDiscover(t *testing.T) {
 		if err := json.Unmarshal(c.payload, &wire); err != nil {
 			t.Fatalf("catalog callback payload: %v", err)
 		}
-		if strings.HasSuffix(wire.URL, "/models") && wire.Headers.Get("x-opencode-session") != "" {
-			t.Fatalf("catalog /models request must not include x-opencode-session: %v", wire.Headers)
+		if isDocFetch(wire.URL) && (wire.Headers.Get("x-opencode-session") != "" || wire.Headers.Get("Authorization") != "") {
+			t.Fatalf("docs-page request must carry no session or credential: %v", wire.Headers)
 		}
 	}
 	if byID["opencode-go/glm-5.2"].DisplayName != "glm-5.2" {
@@ -888,11 +873,7 @@ func TestPrefixDisabledE2E(t *testing.T) {
 
 func TestUnroutableModelExcludedWithDiagnostic(t *testing.T) {
 	m, f, st, yamlText := newIntegrationManager(t)
-	st.setCatalogBody(`{"data":[
-		{"id":"glm-5.2"},
-		{"id":"glm-5.2"},
-		{"id":"weird-unknown-9x"}
-	]}`)
+	st.setCatalogModels(chatModel("glm-5.2"), chatModel("glm-5.2"), docModel{"weird-unknown-9x", "@ai-sdk/unknown"})
 	resp := mustHandle(t, m, "plugin.reconfigure", lifecycleRequestBody(yamlText))
 	if env := decodeEnv(t, resp); !env.OK {
 		t.Fatalf("reconfigure: %s", resp)
@@ -928,10 +909,7 @@ func TestExecuteNativePassthroughMalformedUpstream(t *testing.T) {
 
 func TestDuplicateCatalogEntriesDeduped(t *testing.T) {
 	m, _, st, yamlText := newIntegrationManager(t)
-	st.setCatalogBody(`{"data":[
-		{"id":"glm-5.2"},
-		{"id":"glm-5.2"}
-	]}`)
+	st.setCatalogModels(chatModel("glm-5.2"), chatModel("glm-5.2"))
 	resp := mustHandle(t, m, "plugin.reconfigure", lifecycleRequestBody(yamlText))
 	if env := decodeEnv(t, resp); !env.OK {
 		t.Fatalf("reconfigure: %s", resp)
@@ -1054,7 +1032,7 @@ func TestResponsesUnsupportedFeatureDescriptive(t *testing.T) {
 // ---- AC §E upstream errors + §F security, end to end -------------------
 
 func integrationTwoKeyYAML(baseURL string) string {
-	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n  - value: sk-test-2\n", baseURL)
+	return fmt.Sprintf("models-doc-url: %s/docs/go\nallow-http: true\napi-keys:\n  - value: sk-test-1\n  - value: sk-test-2\n", baseURL)
 }
 
 func newTwoKeyManager(t *testing.T) (*Manager, *fakeCaller, *mockOpenCode) {
@@ -1114,8 +1092,10 @@ func TestNoKeyLeakageE2E(t *testing.T) {
 				t.Fatalf("do payload: %v", err)
 			}
 			headers, _ := wire["headers"].(map[string]any)
-			auth, _ := headers["Authorization"].([]any)
-			authVal, _ := auth[0].(string)
+			var authVal string
+			if auth, _ := headers["Authorization"].([]any); len(auth) > 0 {
+				authVal, _ = auth[0].(string)
+			}
 			foundInHeaders := strings.Contains(authVal, "sk-test-")
 			delete(wire, "headers")
 			rest, _ := json.Marshal(wire)
@@ -1141,22 +1121,22 @@ func TestNoKeyLeakageE2E(t *testing.T) {
 	}
 }
 
-// TestHTTPSDefaultEnforced covers AC §F: http base URLs require an explicit
-// allow-http, the invalid-config error names base-url without leaking the
-// key, and the shipped default endpoint is https.
+// TestHTTPSDefaultEnforced covers AC §F: http docs URLs require an explicit
+// allow-http, the invalid-config error names models-doc-url without leaking
+// the key, and the shipped defaults are https.
 func TestHTTPSDefaultEnforced(t *testing.T) {
 	st := newMockOpenCode(t)
 	f := &fakeCaller{responder: newForwardingCaller()}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
-	httpYAML := fmt.Sprintf("base-url: %s\napi-keys:\n  - value: sk-test-1\n", st.srv.URL)
+	httpYAML := fmt.Sprintf("models-doc-url: %s/docs/go\napi-keys:\n  - value: sk-test-1\n", st.srv.URL)
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(httpYAML))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if env.OK || env.Error == nil || env.Error.Code != "invalid_config" || !strings.Contains(env.Error.Message, "base-url") {
+	if env.OK || env.Error == nil || env.Error.Code != "invalid_config" || !strings.Contains(env.Error.Message, "models-doc-url") {
 		t.Fatalf("envelope = %s", resp)
 	}
 	if strings.Contains(env.Error.Message, "sk-test-1") {
@@ -1172,44 +1152,13 @@ func TestHTTPSDefaultEnforced(t *testing.T) {
 	}
 
 	// Config now mandates at least one key; supply a throwaway key so the
-	// unset-field defaults (https base-url) still apply.
+	// unset-field defaults (https URLs) still apply.
 	cfg, err := config.Load([]byte(dummyKeyYAML))
 	if err != nil {
 		t.Fatalf("default config load: %v", err)
 	}
-	if !strings.HasPrefix(cfg.BaseURL, "https://") {
-		t.Fatalf("default base-url = %q, want https default", cfg.BaseURL)
-	}
-}
-
-// TestRouteOverrideEndpointReachesUpstream pins that a user route override,
-// not the route default, determines the upstream URL (arch §5 route priority,
-// FR-004).
-func TestRouteOverrideEndpointReachesUpstream(t *testing.T) {
-	m, _, st, yamlText := newIntegrationManager(t)
-	st.setCatalogBody(`{"data":[{"id":"totally-new-x"}]}`)
-	yamlText += "route-overrides:\n  totally-new-x:\n    protocol: messages\n    endpoint: /v1/messages-override\n"
-	resp := mustHandle(t, m, "plugin.reconfigure", lifecycleRequestBody(yamlText))
-	if env := decodeEnv(t, resp); !env.OK {
-		t.Fatalf("reconfigure: %s", resp)
-	}
-	env := mustExecute(t, m, "opencode-go/totally-new-x", "claude",
-		[]byte(`{"model":"opencode-go/totally-new-x","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
-	if !env.OK {
-		t.Fatalf("execute envelope = %+v", env.Error)
-	}
-	st.mu.Lock()
-	auth, raw := st.lastMessagesAuth, st.lastMessagesBody
-	st.mu.Unlock()
-	if auth != "sk-test-1" {
-		t.Fatalf("override endpoint lost messages auth: %q", auth)
-	}
-	var upstream map[string]any
-	if err := json.Unmarshal(raw, &upstream); err != nil {
-		t.Fatalf("mock body: %v (%s)", err, raw)
-	}
-	if upstream["model"] != "totally-new-x" {
-		t.Fatalf("upstream model = %v", upstream["model"])
+	if !strings.HasPrefix(cfg.ModelsDocURL, "https://") || !strings.HasPrefix(cfg.UsageURL, "https://") {
+		t.Fatalf("default URLs = %q %q, want https defaults", cfg.ModelsDocURL, cfg.UsageURL)
 	}
 }
 
