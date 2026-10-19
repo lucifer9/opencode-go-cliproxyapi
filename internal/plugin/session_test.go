@@ -22,7 +22,7 @@ func TestResolveOpenCodeSessionIDPrecedence(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Metadata: tc.metadata, Headers: tc.headers, SourceFormat: "openai", OriginalRequest: []byte(fallbackBody)}}
+			req := executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Metadata: tc.metadata, Headers: tc.headers, SourceFormat: "openai", OriginalRequest: []byte(fallbackBody), Payload: []byte(fallbackBody)}}
 			got, eErr := resolveOpenCodeSessionID(req)
 			if eErr != nil || got != tc.want {
 				t.Fatalf("session = %q, error = %v, want %q", got, eErr, tc.want)
@@ -30,9 +30,9 @@ func TestResolveOpenCodeSessionIDPrecedence(t *testing.T) {
 		})
 	}
 
-	req := executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{SourceFormat: "openai", OriginalRequest: []byte(fallbackBody)}}
+	req := executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{SourceFormat: "openai", OriginalRequest: []byte(fallbackBody), Payload: []byte(fallbackBody)}}
 	got, eErr := resolveOpenCodeSessionID(req)
-	want, wantErr := deriveOpenCodeSessionID(req.SourceFormat, req.OriginalRequest)
+	want, wantErr := deriveOpenCodeSessionID(req.SourceFormat, req.Payload)
 	if eErr != wantErr || got != want {
 		t.Fatalf("fallback session = %q, error = %v, want %q, error %v", got, eErr, want, wantErr)
 	}

@@ -47,7 +47,7 @@ func testCfg() config.Config {
 		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "opencode-go"},
 		MaxResponseBytes: 1 << 20,
 		Catalog:          config.Catalog{StaleWhileUnavailable: true},
-		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true},
+		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true, Gemini: true},
 	}
 }
 
@@ -62,6 +62,10 @@ func msgs(id string) docRow {
 
 func resp(id string) docRow {
 	return docRow{Name: id, ID: id, Endpoint: testBase + "/openai/v1/responses", Package: "@ai-sdk/openai"}
+}
+
+func gem(id string) docRow {
+	return docRow{Name: id, ID: id, Endpoint: testBase + "/google/v1beta/models/" + id, Package: "@ai-sdk/google"}
 }
 
 // docPage renders rows as the docs page Endpoints table.
@@ -110,6 +114,7 @@ func TestRouteEndpointPath(t *testing.T) {
 		{RouteChatCompletions, "/openai/v1/chat/completions"},
 		{RouteMessages, "/anthropic/v1/messages"},
 		{RouteResponses, "/openai/v1/responses"},
+		{RouteGemini, "/google/v1beta/models"},
 		{Route("bogus"), ""},
 	}
 	for _, c := range cases {
@@ -165,7 +170,7 @@ func TestRefreshSuccess(t *testing.T) {
 func TestUnsupportedPackageExcluded(t *testing.T) {
 	fc := &fakeClient{resp: okDoc(
 		chat("glm-5.3"),
-		docRow{ID: "gemini-4-argon-contributor", Endpoint: testBase + "/google/v1beta/models/gemini-4-argon-contributor", Package: "@ai-sdk/google"},
+		docRow{ID: "grok-x", Endpoint: testBase + "/xai/v1/chat", Package: "@ai-sdk/xai"},
 		docRow{ID: "no-package", Endpoint: testBase + "/openai/v1/chat/completions"},
 	)}
 	m := newManager(testCfg(), fc)
@@ -175,7 +180,7 @@ func TestUnsupportedPackageExcluded(t *testing.T) {
 		t.Fatalf("models = %+v, want only glm-5.3", got)
 	}
 	want := []UnsupportedModel{
-		{UpstreamID: "gemini-4-argon-contributor", Reason: `unsupported AI SDK package "@ai-sdk/google"`},
+		{UpstreamID: "grok-x", Reason: `unsupported AI SDK package "@ai-sdk/xai"`},
 		{UpstreamID: "no-package", Reason: `unsupported AI SDK package ""`},
 	}
 	if got := m.Unsupported(); !reflect.DeepEqual(got, want) {
@@ -491,6 +496,7 @@ func TestRouteCountsViaModels(t *testing.T) {
 		chat("glm-5.3"), chat("kimi-k3"),
 		msgs("minimax-m3"), msgs("qwen3.8-max"), msgs("claude-haiku-5-5"),
 		resp("gpt-5.6-luna"),
+		gem("gemini-4-argon-contributor"),
 	)}
 	m := newManager(testCfg(), fc)
 	mustRefresh(t, m)
@@ -498,7 +504,7 @@ func TestRouteCountsViaModels(t *testing.T) {
 	for _, mo := range m.Models() {
 		counts[mo.Protocol]++
 	}
-	if counts[RouteChatCompletions] != 2 || counts[RouteMessages] != 3 || counts[RouteResponses] != 1 {
+	if counts[RouteChatCompletions] != 2 || counts[RouteMessages] != 3 || counts[RouteResponses] != 1 || counts[RouteGemini] != 1 {
 		t.Errorf("counts = %v", counts)
 	}
 }
@@ -574,15 +580,16 @@ func TestProtocolFlagsExcludeRoutes(t *testing.T) {
 		excluded string
 		routable []string
 	}{
-		{RouteChatCompletions, func(p *config.Protocols) { p.ChatCompletions = false }, "glm-5.3", []string{"qwen3.8-max", "gpt-5.6-luna"}},
-		{RouteMessages, func(p *config.Protocols) { p.Messages = false }, "qwen3.8-max", []string{"glm-5.3", "gpt-5.6-luna"}},
-		{RouteResponses, func(p *config.Protocols) { p.Responses = false }, "gpt-5.6-luna", []string{"glm-5.3", "qwen3.8-max"}},
+		{RouteChatCompletions, func(p *config.Protocols) { p.ChatCompletions = false }, "glm-5.3", []string{"qwen3.8-max", "gpt-5.6-luna", "gemini-x"}},
+		{RouteMessages, func(p *config.Protocols) { p.Messages = false }, "qwen3.8-max", []string{"glm-5.3", "gpt-5.6-luna", "gemini-x"}},
+		{RouteResponses, func(p *config.Protocols) { p.Responses = false }, "gpt-5.6-luna", []string{"glm-5.3", "qwen3.8-max", "gemini-x"}},
+		{RouteGemini, func(p *config.Protocols) { p.Gemini = false }, "gemini-x", []string{"glm-5.3", "qwen3.8-max", "gpt-5.6-luna"}},
 	}
 	for _, tc := range routes {
 		t.Run(string(tc.route), func(t *testing.T) {
 			cfg := testCfg()
 			tc.disable(&cfg.Protocols)
-			m := newManager(cfg, &fakeClient{resp: okDoc(chat("glm-5.3"), msgs("qwen3.8-max"), resp("gpt-5.6-luna"))})
+			m := newManager(cfg, &fakeClient{resp: okDoc(chat("glm-5.3"), msgs("qwen3.8-max"), resp("gpt-5.6-luna"), gem("gemini-x"))})
 			mustRefresh(t, m)
 
 			models := m.Models()

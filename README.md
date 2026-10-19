@@ -28,6 +28,7 @@ This plugin exposes OpenCode Go as a single provider (`opencode-go`) backed by a
   - OpenAI Chat Completions (`/v1/chat/completions`)
   - Anthropic Messages (`/v1/messages`)
   - OpenAI Responses (`/v1/responses`)
+  - Google Gemini (`/google/v1beta/models/{model}:generateContent`), translated with CLIProxyAPI's built-in translators and resuming Gemini 4 long decodes (`CONTINUATION`) transparently
 - **Thinking & Reasoning Support**: Maps reasoning effort across supported client and upstream formats.
 - **Docs-Driven Catalog**: Reads models, upstream URLs, and protocols from the Endpoints table of the [OpenCode Go docs](https://opencode.ai/v2/docs/console/go#endpoints), refreshes it periodically, and keeps the last good snapshot when a refresh fails.
 - **Multi-Key Auth Scheduling**: Pools multiple API keys with CLIProxyAPI's native scheduler for rotation, retries, and error cooldowns across all protocols.
@@ -97,6 +98,7 @@ plugins:
         chat-completions: true   # enables models routed to /openai/v1/chat/completions
         messages: true           # enables models routed to /anthropic/v1/messages
         responses: true          # enables models routed to /openai/v1/responses
+        gemini: true             # enables models routed to /google/v1beta/models
 
       # Execution settings
       request-timeout: "5m"              # upstream request timeout (default: "5m")
@@ -118,6 +120,7 @@ plugins:
 | `protocols.chat-completions` | `bool` | `true` | Protocol switch for Chat Completions endpoints. |
 | `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
 | `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
+| `protocols.gemini` | `bool` | `true` | Protocol switch for Gemini endpoints. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `models-doc-url` / `usage-url` for local testing. |

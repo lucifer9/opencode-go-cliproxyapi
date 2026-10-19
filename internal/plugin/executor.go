@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/adapter/chatcompletions"
+	"opencode-go-cliproxyapi/internal/adapter/gemini"
 	"opencode-go-cliproxyapi/internal/adapter/messages"
 	"opencode-go-cliproxyapi/internal/adapter/responses"
 	"opencode-go-cliproxyapi/internal/adapter/shared"
@@ -98,47 +99,93 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_opencode_session=%s fallback=%t", "non-stream", req.SourceFormat, sessionID, sessionID == emptyOpenCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, &res.tools)
+	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.Payload, false, &res.tools)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
 
-	url := res.rec.UpstreamURL
+	url := upstreamURL(res.rec, false)
+	headers := upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID)
 	debugTrace("executor resolved public_model=%s upstream_model=%s route=%s url=%s key_count=%d", req.Model, res.rec.UpstreamID, res.rec.Protocol, url, len(res.cfg.APIKeys))
-	debugTrace("executor sending non-stream url=%s body_len=%d", url, len(upstreamBody))
 	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
 	defer cancel()
-	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
-		Body:    upstreamBody,
-	})
-	if err != nil {
-		debugTrace("executor non-stream network error: %v", err)
-		return classEnvelope(errclass.FromNetwork(err)), nil
+	resp, eErr := m.postUpstream(ctx, res.cfg, url, headers, upstreamBody)
+	if eErr != nil {
+		return classEnvelope(eErr), nil
 	}
-	debugTrace("executor received non-stream status=%d body_len=%d", resp.StatusCode, len(resp.Body))
-	if resp.StatusCode >= 400 {
-		return classEnvelope(shared.UpstreamStatusError(resp.StatusCode, resp.Body)), nil
+	var converted []byte
+	if res.rec.Protocol == catalog.RouteGemini {
+		converted, eErr = m.finishGeminiNonStream(ctx, res, req, url, headers, upstreamBody, resp.Body)
+	} else {
+		converted, eErr = convertNonStream(res.rec.Protocol, req.SourceFormat, resp.StatusCode, resp.Body, &res.tools)
 	}
-	// Parse/envelope guard only; true OOM prevention belongs to the host transport's byte cap.
-	if int64(len(resp.Body)) > res.cfg.MaxResponseBytes {
-		return classEnvelope(errclass.Translation("response exceeds max-response-bytes")), nil
-	}
-	converted, eErr := convertNonStream(res.rec.Protocol, req.SourceFormat, resp.StatusCode, resp.Body, &res.tools)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
 	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers}), nil
 }
 
+// postUpstream sends one non-stream upstream request and classifies
+// transport failures, error statuses, and oversized bodies.
+func (m *Manager) postUpstream(ctx context.Context, cfg config.Config, url string, headers http.Header, body []byte) (pluginapi.HTTPResponse, *errclass.Error) {
+	debugTrace("executor sending non-stream url=%s body_len=%d", url, len(body))
+	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{
+		Method:  http.MethodPost,
+		URL:     url,
+		Headers: headers,
+		Body:    body,
+	})
+	if err != nil {
+		debugTrace("executor non-stream network error: %v", err)
+		return resp, errclass.FromNetwork(err)
+	}
+	debugTrace("executor received non-stream status=%d body_len=%d", resp.StatusCode, len(resp.Body))
+	if resp.StatusCode >= 400 {
+		return resp, shared.UpstreamStatusError(resp.StatusCode, resp.Body)
+	}
+	// Parse/envelope guard only; true OOM prevention belongs to the host transport's byte cap.
+	if int64(len(resp.Body)) > cfg.MaxResponseBytes {
+		return resp, errclass.Translation("response exceeds max-response-bytes")
+	}
+	return resp, nil
+}
+
+// finishGeminiNonStream completes a Gemini long decode: while a response
+// ends with a continuation token, the request is resent with it and the
+// responses merge into one before translation back to the client format.
+// The loop is bounded by ctx (request-timeout).
+func (m *Manager) finishGeminiNonStream(ctx context.Context, res *resolvedExecution, req executorRequest, url string, headers http.Header, upstreamBody, first []byte) ([]byte, *errclass.Error) {
+	collector := gemini.NewNonStreamCollector()
+	body := first
+	for {
+		token, eErr := collector.Add(body)
+		if eErr != nil {
+			return nil, eErr
+		}
+		if token == "" {
+			break
+		}
+		next, eErr := gemini.WithContinuation(upstreamBody, token)
+		if eErr != nil {
+			return nil, eErr
+		}
+		resp, eErr := m.postUpstream(ctx, res.cfg, url, headers, next)
+		if eErr != nil {
+			return nil, eErr
+		}
+		body = resp.Body
+	}
+	return gemini.ConvertNonStreamResponse(req.SourceFormat, res.rec.UpstreamID, req.Payload, upstreamBody, http.StatusOK, collector.Body())
+}
+
 // buildUpstreamRequest translates the client body for route. The docs table
 // publishes no per-model thinking limits, so adapters get a nil
 // ThinkingSupport and map reasoning effort with their unclamped defaults.
-func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
+func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, stream bool, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
 	var ts *pluginapi.ThinkingSupport
 	switch route {
+	case catalog.RouteGemini:
+		return gemini.BuildRequest(upstreamModel, sourceFormat, sourceBody, stream)
 	case catalog.RouteChatCompletions:
 		return chatcompletions.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
 	case catalog.RouteMessages:
@@ -151,14 +198,26 @@ func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat strin
 
 func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header {
 	var h http.Header
-	if route == catalog.RouteMessages {
+	switch route {
+	case catalog.RouteMessages:
 		h = messages.AuthHeaders(key)
-	} else {
+	case catalog.RouteGemini:
+		h = gemini.AuthHeaders(key)
+	default:
 		// Chat Completions and Responses endpoints are OpenAI-style bearer.
 		h = chatcompletions.AuthHeaders(key)
 	}
 	h.Set("x-opencode-session", sessionID)
 	return h
+}
+
+// upstreamURL is the request URL for rec. Gemini's docs URL names the model
+// and needs the generate method appended; other routes use it verbatim.
+func upstreamURL(rec catalog.ModelRecord, stream bool) string {
+	if rec.Protocol == catalog.RouteGemini {
+		return gemini.URL(rec.UpstreamURL, stream)
+	}
+	return rec.UpstreamURL
 }
 
 const emptyOpenCodeSessionID = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -180,7 +239,7 @@ func resolveOpenCodeSessionID(req executorRequest) (string, *errclass.Error) {
 			return sid, nil
 		}
 	}
-	return deriveOpenCodeSessionID(req.SourceFormat, req.OriginalRequest)
+	return deriveOpenCodeSessionID(req.SourceFormat, req.Payload)
 }
 
 // deriveOpenCodeSessionID hashes the model-visible content of the initial user
@@ -329,10 +388,15 @@ type streamConverter interface {
 var (
 	_ interface{ Flush() [][]byte } = (*chatcompletions.StreamConverter)(nil)
 	_ interface{ Flush() [][]byte } = (*messages.StreamConverter)(nil)
+	_ interface{ Flush() [][]byte } = (*gemini.StreamConverter)(nil)
+	_ continuer                     = (*gemini.StreamConverter)(nil)
 )
 
-func newStreamConverter(route catalog.Route, sourceFormat string, tools ...*shared.ResponseTools) streamConverter {
+func newStreamConverter(route catalog.Route, call streamCall, upstreamModel string, tools ...*shared.ResponseTools) streamConverter {
+	sourceFormat := call.sourceFormat
 	switch route {
+	case catalog.RouteGemini:
+		return gemini.NewStreamConverter(sourceFormat, upstreamModel, call.clientBody, call.upstreamBody)
 	case catalog.RouteMessages:
 		return messages.NewStreamConverter(sourceFormat, tools...)
 	case catalog.RouteResponses:
@@ -369,36 +433,21 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_opencode_session=%s fallback=%t", "stream", req.SourceFormat, sessionID, sessionID == emptyOpenCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, &res.tools)
+	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.Payload, true, &res.tools)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
 
-	url := res.rec.UpstreamURL
-	debugTrace("executor sending stream url=%s body_len=%d", url, len(upstreamBody))
-	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
-	defer cancel()
-	st, _, id, err := m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
-		Body:    upstreamBody,
-	})
-	debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v", st, id, err)
-	if err != nil {
-		return classEnvelope(errclass.FromNetwork(err)), nil
+	call := streamCall{
+		sourceFormat: req.SourceFormat,
+		clientBody:   req.Payload,
+		upstreamBody: upstreamBody,
+		url:          upstreamURL(res.rec, true),
+		headers:      upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
 	}
-	if st >= 400 {
-		var body []byte
-		if id != "" {
-			watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
-				_ = m.bridge.StreamClose(id)
-			})
-			body, _, _, _ = m.bridge.StreamRead(id)
-			watchdog.Stop()
-			_ = m.bridge.StreamClose(id)
-		}
-		return classEnvelope(shared.UpstreamStatusError(st, body)), nil
+	id, eErr := m.openUpstreamStream(res.cfg, call.url, call.headers, upstreamBody)
+	if eErr != nil {
+		return classEnvelope(eErr), nil
 	}
 
 	downID := req.StreamID
@@ -409,16 +458,69 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		if m.bridge != nil {
 			defer m.bridge.inFlight.Done()
 		}
-		m.pumpStream(downID, id, res, req.SourceFormat)
+		m.pumpStream(downID, id, res, call)
 	}()
 	return okEnvelope(struct{}{}), nil
 }
 
-func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string) {
+// streamCall is what a stream pump needs beyond the resolved execution:
+// the client format and body for response translation, and the upstream
+// request so a long decode can be resumed.
+type streamCall struct {
+	sourceFormat string
+	clientBody   []byte
+	upstreamBody []byte
+	url          string
+	headers      http.Header
+}
+
+// openUpstreamStream opens one upstream stream and returns its id. An error
+// status is read, closed, and classified so CPA can fail over before any
+// byte reaches the client.
+func (m *Manager) openUpstreamStream(cfg config.Config, url string, headers http.Header, body []byte) (string, *errclass.Error) {
+	debugTrace("executor sending stream url=%s body_len=%d", url, len(body))
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+	defer cancel()
+	st, _, id, err := m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
+		Method:  http.MethodPost,
+		URL:     url,
+		Headers: headers,
+		Body:    body,
+	})
+	debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v", st, id, err)
+	if err != nil {
+		return "", errclass.FromNetwork(err)
+	}
+	if st >= 400 {
+		var errBody []byte
+		if id != "" {
+			watchdog := time.AfterFunc(cfg.RequestTimeout, func() {
+				_ = m.bridge.StreamClose(id)
+			})
+			errBody, _, _, _ = m.bridge.StreamRead(id)
+			watchdog.Stop()
+			_ = m.bridge.StreamClose(id)
+		}
+		return "", shared.UpstreamStatusError(st, errBody)
+	}
+	return id, nil
+}
+
+// continuer is implemented by stream converters whose upstream can end a
+// stream mid-response and ask to be resumed (Gemini long decode).
+type continuer interface {
+	ContinuationToken() string
+}
+
+func (m *Manager) pumpStream(downID, firstUpstreamID string, res *resolvedExecution, call streamCall) {
+	// The upstream id changes when a long decode resumes; the watchdog reads
+	// it from another goroutine.
+	var upstream atomic.Pointer[string]
+	upstream.Store(&firstUpstreamID)
 	var closeOnce sync.Once
 	closeStreams := func(downErrMsg string) {
 		closeOnce.Do(func() {
-			_ = m.bridge.StreamClose(upstreamID)
+			_ = m.bridge.StreamClose(*upstream.Load())
 			_ = m.bridge.StreamCloseDownstream(downID, downErrMsg)
 		})
 	}
@@ -432,17 +534,18 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			}
 		}()
 		aborted.Store(true)
-		_ = m.bridge.StreamClose(upstreamID)
+		_ = m.bridge.StreamClose(*upstream.Load())
 	})
 	defer watchdog.Stop()
 
-	conv := newStreamConverter(res.rec.Protocol, sourceFormat, &res.tools)
+	conv := newStreamConverter(res.rec.Protocol, call, res.rec.UpstreamID, &res.tools)
 	var (
 		total          int64
 		upstreamClosed bool
 		convDone       bool
 	)
 	for {
+		upstreamID := *upstream.Load()
 		payload, readErrMsg, closed, err := m.bridge.StreamRead(upstreamID)
 		debugTrace("executor stream read chunk_len=%d closed=%t readErrMsg=%q err=%v", len(payload), closed, readErrMsg, err)
 		upstreamClosed = closed
@@ -473,8 +576,34 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			return
 		}
 		convDone = done
-		if convDone || upstreamClosed {
+		if convDone {
 			break
+		}
+		if upstreamClosed {
+			c, ok := conv.(continuer)
+			if !ok {
+				break
+			}
+			token := c.ContinuationToken()
+			if token == "" {
+				break
+			}
+			if aborted.Load() {
+				closeStreams(errclass.Redact("stream exceeded request-timeout"))
+				return
+			}
+			next, eErr := gemini.WithContinuation(call.upstreamBody, token)
+			if eErr == nil {
+				var nextID string
+				nextID, eErr = m.openUpstreamStream(res.cfg, call.url, call.headers, next)
+				if eErr == nil {
+					_ = m.bridge.StreamClose(upstreamID)
+					upstream.Store(&nextID)
+					continue
+				}
+			}
+			closeStreams(errclass.Redact(eErr.Message))
+			return
 		}
 	}
 	debugTrace("executor stream loop end convDone=%t upstreamClosed=%t", convDone, upstreamClosed)

@@ -2,12 +2,14 @@
 
 ### Features
 
+- Serve Gemini models (`@ai-sdk/google`, e.g. `gemini-4-argon-contributor`) to OpenAI Chat, Claude, and Responses clients through CLIProxyAPI's built-in Gemini translators, with a `protocols.gemini` switch. Gemini 4 long decodes that stop with `CONTINUATION` are resumed with the continuation token and returned as one response with summed usage. An assistant prefill (history ending with an assistant turn), which the Gemini upstream rejects, is closed with a short `Continue.` user turn so the model continues it.
 - Read models and routes from the Endpoints table of the OpenCode Go docs page (`https://opencode.ai/v2/docs/console/go`). Each row's AI SDK package selects the protocol and its URL is used as-is, so new models work without a plugin update. Rows that point off the docs host, or use a package without an adapter, are excluded and logged.
 
 ### Bug Fixes
 
 - Move upstream calls to the OpenCode Go inference API (`https://opencode.ai/inference/go`): Chat Completions and Responses use `/openai/v1/...`, Messages uses `/anthropic/v1/messages`, and quota uses `/v1/usage`.
 - Route `claude-haiku-5-5`, `space-bunny`, `step-5-preview`, and `beam-free`, which the old built-in family table missed.
+- Build upstream requests from the payload CLIProxyAPI hands the executor instead of the raw client body, so host request interceptors apply and clients in formats the plugin does not declare (for example native Gemini clients, translated by the host) work.
 
 - Preserve Claude image tool results when routing to Chat Completions: retain images in an associated user message after tool replies, preserve text, tool references and error markers, and include images in session derivation. The selected upstream model must support image input.
 

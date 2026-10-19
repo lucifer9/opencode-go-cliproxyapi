@@ -194,6 +194,10 @@ func TestRedactAPIKeyEchoes(t *testing.T) {
 		{"x-api-key: abc123 next", "x-api-key: abc123 next"},
 		// Bearer behavior unchanged alongside the new pattern.
 		{"Bearer tok1 then x-api-key: sk-99887766aabb end", "Bearer [redacted] then x-api-key: [redacted] end"},
+		// Gemini-route header uses the same rules.
+		{"echo x-goog-api-key: sk-goog-12345678 end", "echo x-goog-api-key: [redacted] end"},
+		{`{"X-Goog-Api-Key":"AIza1234abcd"}`, `{"X-Goog-Api-Key":"[redacted]"}`},
+		{"the x-goog-api-key header is required", "the x-goog-api-key header is required"},
 	}
 	for _, tc := range tests {
 		got := Redact(tc.in)

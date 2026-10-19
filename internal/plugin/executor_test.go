@@ -34,7 +34,7 @@ func execReqBody(model, format string, body []byte, stream bool) []byte {
 	b, _ := json.Marshal(executorRequest{
 		ExecutorRequest: pluginapi.ExecutorRequest{
 			AuthProvider: ProviderID, AuthAttributes: map[string]string{"api_key": testKey},
-			Model: model, SourceFormat: format, OriginalRequest: body, Stream: stream,
+			Model: model, SourceFormat: format, OriginalRequest: body, Payload: body, Stream: stream,
 		},
 	})
 	return b
@@ -48,7 +48,7 @@ func execStreamReqBodyForKey(model, format string, body []byte, downStreamID, ke
 	b, _ := json.Marshal(executorRequest{
 		ExecutorRequest: pluginapi.ExecutorRequest{
 			AuthProvider: ProviderID, AuthAttributes: map[string]string{"api_key": key},
-			Model: model, SourceFormat: format, OriginalRequest: body, Stream: true,
+			Model: model, SourceFormat: format, OriginalRequest: body, Payload: body, Stream: true,
 		},
 		StreamID: downStreamID,
 	})
@@ -209,7 +209,7 @@ func mustExecute(t *testing.T, m *Manager, model, format string, body []byte) pl
 func execReqBodyWithKey(model, format string, body []byte, stream bool, key string) []byte {
 	b, _ := json.Marshal(executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{
 		AuthProvider: ProviderID, AuthAttributes: map[string]string{"api_key": key},
-		Model: model, SourceFormat: format, OriginalRequest: body, Stream: stream,
+		Model: model, SourceFormat: format, OriginalRequest: body, Payload: body, Stream: stream,
 	}})
 	return b
 }
@@ -217,7 +217,7 @@ func execReqBodyWithKey(model, format string, body []byte, stream bool, key stri
 func execReqBodyWithSessionInputs(model, format string, body []byte, stream bool, key, canonical, header string) []byte {
 	b, _ := json.Marshal(executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{
 		AuthProvider: ProviderID, AuthAttributes: map[string]string{"api_key": key},
-		Model: model, SourceFormat: format, OriginalRequest: body, Stream: stream,
+		Model: model, SourceFormat: format, OriginalRequest: body, Payload: body, Stream: stream,
 		Metadata: map[string]any{"canonical_session_id": canonical},
 		Headers:  http.Header{"X-Claude-Code-Session-Id": []string{header}},
 	}})
@@ -1371,7 +1371,7 @@ func TestConvertNonStreamSeamBranches(t *testing.T) {
 		eErr.Class != errclass.ClassTranslation {
 		t.Fatalf("unknown route = %v", eErr)
 	}
-	if _, eErr := buildUpstreamRequest(catalog.Route("weird"), "m", "openai", nil); eErr == nil ||
+	if _, eErr := buildUpstreamRequest(catalog.Route("weird"), "m", "openai", nil, false); eErr == nil ||
 		eErr.Class != errclass.ClassTranslation {
 		t.Fatalf("unknown route build = %v", eErr)
 	}
@@ -1475,7 +1475,7 @@ func TestExecuteInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: "wrong-provider", AuthAttributes: map[string]string{"api_key": testKey},
-				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody),
+				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Payload: []byte(ccRequestBody),
 			},
 		}
 		b, _ := json.Marshal(req)
@@ -1493,7 +1493,7 @@ func TestExecuteInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: ProviderID, AuthAttributes: map[string]string{"api_key": "   "},
-				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody),
+				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Payload: []byte(ccRequestBody),
 			},
 		}
 		b, _ := json.Marshal(req)
@@ -1515,7 +1515,7 @@ func TestExecuteStreamInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: "wrong-provider", AuthAttributes: map[string]string{"api_key": testKey},
-				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Stream: true,
+				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Payload: []byte(ccRequestBody), Stream: true,
 			},
 			StreamID: "down-bad-auth",
 		}
@@ -1537,7 +1537,7 @@ func TestExecuteStreamInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: ProviderID, AuthAttributes: map[string]string{},
-				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Stream: true,
+				Model: "opencode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Payload: []byte(ccRequestBody), Stream: true,
 			},
 			StreamID: "down-bad-auth-key",
 		}

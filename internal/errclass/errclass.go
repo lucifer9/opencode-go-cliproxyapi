@@ -129,8 +129,9 @@ func ToEnvelopeError(e *Error) pluginabi.Error {
 // twice yields the same output — which is what makes edge re-redaction safe.
 var bearerRe = regexp.MustCompile(`(?i)bearer[ \t]*[^\s,"]*`)
 
-// apiKeyRe finds x-api-key header echoes (Messages-route auth, FR-007):
-// case-insensitive name, then a run of quote/colon/equals/space separators,
+// apiKeyRe finds x-api-key and x-goog-api-key header echoes (Messages- and
+// Gemini-route auth, FR-007): case-insensitive name, then a run of
+// quote/colon/equals/space separators,
 // then the value run. The value class spans hex/base62 plus the base64
 // alphabet ("+", "/", "="), matching bearerRe/queryKeyRe sibling classes.
 // The candidate is only replaced when the value looks
@@ -138,10 +139,11 @@ var bearerRe = regexp.MustCompile(`(?i)bearer[ \t]*[^\s,"]*`)
 // "x-api-key authentication failed" — passes untouched; every real key
 // alphabet (hex, base64, base62) carries digits. Idempotent: "[redacted]"
 // starts with '[' which is outside the value class, so it never re-matches.
-var apiKeyRe = regexp.MustCompile(`(?i)x-api-key["':= ]*[A-Za-z0-9_\-.+/=]+`)
+var apiKeyRe = regexp.MustCompile(`(?i)x-(?:goog-)?api-key["':= ]*[A-Za-z0-9_\-.+/=]+`)
 
 func redactAPIKey(match string) string {
-	value := strings.TrimLeft(match[len("x-api-key"):], "\"':= ")
+	name := strings.Index(strings.ToLower(match), "api-key") + len("api-key")
+	value := strings.TrimLeft(match[name:], "\"':= ")
 	hasDigit := false
 	for _, r := range value {
 		if r >= '0' && r <= '9' {

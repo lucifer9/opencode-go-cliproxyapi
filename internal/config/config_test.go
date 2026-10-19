@@ -43,7 +43,7 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if !c.Catalog.StaleWhileUnavailable {
 		t.Errorf("StaleWhileUnavailable = false")
 	}
-	if !c.Protocols.ChatCompletions || !c.Protocols.Messages || !c.Protocols.Responses {
+	if !c.Protocols.ChatCompletions || !c.Protocols.Messages || !c.Protocols.Responses || !c.Protocols.Gemini {
 		t.Errorf("Protocols = %+v", c.Protocols)
 	}
 	if c.AllowHTTP {
@@ -76,6 +76,7 @@ protocols:
   chat-completions: false
   messages: false
   responses: false
+  gemini: false
 allow-http: true
 request-timeout: 5m
 max-response-bytes: 1024
@@ -102,7 +103,7 @@ max-response-bytes: 1024
 	if c.Catalog.StaleWhileUnavailable {
 		t.Errorf("StaleWhileUnavailable = true")
 	}
-	if c.Protocols.ChatCompletions || c.Protocols.Messages || c.Protocols.Responses {
+	if c.Protocols.ChatCompletions || c.Protocols.Messages || c.Protocols.Responses || c.Protocols.Gemini {
 		t.Errorf("Protocols = %+v", c.Protocols)
 	}
 	if !c.AllowHTTP {

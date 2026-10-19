@@ -35,6 +35,7 @@ const (
 	RouteChatCompletions Route = "chat-completions"
 	RouteMessages        Route = "messages"
 	RouteResponses       Route = "responses"
+	RouteGemini          Route = "gemini"
 )
 
 // routeEndpoints maps each route to its upstream endpoint path under the
@@ -44,6 +45,7 @@ var routeEndpoints = map[Route]string{
 	RouteChatCompletions: "/openai/v1/chat/completions",
 	RouteMessages:        "/anthropic/v1/messages",
 	RouteResponses:       "/openai/v1/responses",
+	RouteGemini:          "/google/v1beta/models",
 }
 
 // EndpointPath returns the route's upstream endpoint path, or "" for
@@ -65,6 +67,7 @@ var packageRoutes = map[string]Route{
 	"@ai-sdk/openai":            RouteResponses,
 	"@ai-sdk/openai-compatible": RouteChatCompletions,
 	"@ai-sdk/anthropic":         RouteMessages,
+	"@ai-sdk/google":            RouteGemini,
 }
 
 // ModelRecord is one routable catalog entry (arch §7, FR-003). The docs
@@ -282,6 +285,8 @@ func (m *Manager) protocolEnabled(r Route) bool {
 		return m.cfg.Protocols.Messages
 	case RouteResponses:
 		return m.cfg.Protocols.Responses
+	case RouteGemini:
+		return m.cfg.Protocols.Gemini
 	}
 	return true
 }

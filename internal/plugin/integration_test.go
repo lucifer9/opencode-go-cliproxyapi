@@ -1091,12 +1091,17 @@ func TestNoKeyLeakageE2E(t *testing.T) {
 			if err := json.Unmarshal(c.payload, &wire); err != nil {
 				t.Fatalf("do payload: %v", err)
 			}
+			// Keys may only travel in a route's auth header (Authorization,
+			// x-api-key, or x-goog-api-key).
 			headers, _ := wire["headers"].(map[string]any)
-			var authVal string
-			if auth, _ := headers["Authorization"].([]any); len(auth) > 0 {
-				authVal, _ = auth[0].(string)
+			var authVals []string
+			for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"} {
+				if vals, _ := headers[name].([]any); len(vals) > 0 {
+					v, _ := vals[0].(string)
+					authVals = append(authVals, v)
+				}
 			}
-			foundInHeaders := strings.Contains(authVal, "sk-test-")
+			foundInHeaders := strings.Contains(strings.Join(authVals, " "), "sk-test-")
 			delete(wire, "headers")
 			rest, _ := json.Marshal(wire)
 			for _, k := range keys {
@@ -1104,7 +1109,7 @@ func TestNoKeyLeakageE2E(t *testing.T) {
 					t.Fatalf("key outside headers in host.http.do payload: %s", rest)
 				}
 				if !foundInHeaders && strings.Contains(text, k) {
-					t.Fatalf("key outside Authorization header: %s", text)
+					t.Fatalf("key outside auth headers: %s", text)
 				}
 			}
 		}

@@ -41,11 +41,13 @@ type docModel struct{ id, pkg string }
 func chatModel(id string) docModel { return docModel{id, "@ai-sdk/openai-compatible"} }
 func msgModel(id string) docModel  { return docModel{id, "@ai-sdk/anthropic"} }
 func respModel(id string) docModel { return docModel{id, "@ai-sdk/openai"} }
+func gemModel(id string) docModel  { return docModel{id, "@ai-sdk/google"} }
 
 var docPackagePaths = map[string]string{
 	"@ai-sdk/openai-compatible": "/openai/v1/chat/completions",
 	"@ai-sdk/anthropic":         "/anthropic/v1/messages",
 	"@ai-sdk/openai":            "/openai/v1/responses",
+	"@ai-sdk/google":            "/google/v1beta/models/", // + model id
 }
 
 // docPage renders a docs page whose Endpoints table points each model at
@@ -54,8 +56,12 @@ func docPage(base string, models ...docModel) string {
 	var b strings.Builder
 	b.WriteString(`<table><tr><th>Model</th><th>Model ID</th><th>Endpoint</th><th>AI SDK Package</th></tr>`)
 	for _, mo := range models {
+		path := docPackagePaths[mo.pkg]
+		if strings.HasSuffix(path, "/") {
+			path += mo.id
+		}
 		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td><code>%s%s</code></td><td><code>%s</code></td></tr>`,
-			mo.id, mo.id, base, docPackagePaths[mo.pkg], mo.pkg)
+			mo.id, mo.id, base, path, mo.pkg)
 	}
 	b.WriteString(`</table>`)
 	return b.String()
