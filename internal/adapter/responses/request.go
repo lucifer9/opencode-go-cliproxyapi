@@ -1,5 +1,5 @@
 // Package responses implements the OpenAI Responses protocol adapter
-// (arch §8): upstream endpoint /v1/responses serving GPT 5.6 Luna and
+// (arch §8): upstream endpoint /openai/v1/responses serving GPT 5.6 Luna and
 // any catalog model declared compatible (FR-004). Request translation is
 // FR-005, response and stream translation FR-006, acceptance coverage
 // AC §D. Responses support is REQUIRED first-release scope, not

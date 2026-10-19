@@ -40,7 +40,7 @@ func (f *fakeClient) set(resp pluginapi.HTTPResponse, err error) {
 
 func testCfg() config.Config {
 	return config.Config{
-		CatalogURL:       "https://opencode.ai/zen/go/v1/models",
+		CatalogURL:       "https://opencode.ai/inference/go/v1/models",
 		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "opencode-go"},
 		MaxResponseBytes: 1 << 20,
 		Catalog:          config.Catalog{StaleWhileUnavailable: true},
@@ -75,9 +75,9 @@ func TestRouteEndpointPath(t *testing.T) {
 		route Route
 		want  string
 	}{
-		{RouteChatCompletions, "/v1/chat/completions"},
-		{RouteMessages, "/v1/messages"},
-		{RouteResponses, "/v1/responses"},
+		{RouteChatCompletions, "/openai/v1/chat/completions"},
+		{RouteMessages, "/anthropic/v1/messages"},
+		{RouteResponses, "/openai/v1/responses"},
 		{Route("bogus"), ""},
 	}
 	for _, c := range cases {
@@ -95,7 +95,7 @@ func TestRefreshRequestShape(t *testing.T) {
 	if req.Method != "GET" {
 		t.Errorf("Method = %q, want GET", req.Method)
 	}
-	if req.URL != "https://opencode.ai/zen/go/v1/models" {
+	if req.URL != "https://opencode.ai/inference/go/v1/models" {
 		t.Errorf("URL = %q", req.URL)
 	}
 	if got := req.Headers.Get("Authorization"); got != "Bearer "+testKey {
@@ -114,7 +114,7 @@ func TestRefreshSuccess(t *testing.T) {
 	]}`
 	cfg := testCfg()
 	cfg.RouteOverrides = map[string]config.RouteOverride{
-		"gpt-5.6-luna": {Protocol: "responses", Endpoint: "/v1/responses"},
+		"gpt-5.6-luna": {Protocol: "responses", Endpoint: "/openai/v1/responses"},
 	}
 	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
 	m := newManager(cfg, fc)
@@ -126,7 +126,7 @@ func TestRefreshSuccess(t *testing.T) {
 		t.Errorf("PublicID = %q", luna.PublicID)
 	}
 	if luna.DisplayName != "gpt-5.6-luna" || luna.Protocol != RouteResponses ||
-		luna.EndpointPath != "/v1/responses" {
+		luna.EndpointPath != "/openai/v1/responses" {
 		t.Errorf("luna mapping wrong: %+v", luna)
 	}
 
@@ -134,7 +134,7 @@ func TestRefreshSuccess(t *testing.T) {
 	if glm.DisplayName != "glm-5.2" {
 		t.Errorf("DisplayName fallback = %q, want upstream id", glm.DisplayName)
 	}
-	if glm.Protocol != RouteChatCompletions || glm.EndpointPath != "/v1/chat/completions" {
+	if glm.Protocol != RouteChatCompletions || glm.EndpointPath != "/openai/v1/chat/completions" {
 		t.Errorf("glm route wrong: %+v", glm)
 	}
 	mm := findModel(t, models, "minimax-m3")
@@ -737,24 +737,20 @@ func TestOverrideApplicationRecordedInWarnings(t *testing.T) {
 	}
 }
 
-// TestJoinUpstreamURL pins the shared join formula byte-for-byte against
-// the historical inline expression (TrimSuffix "/" + TrimPrefix "/v1") so
-// both former call sites keep producing identical URLs.
+// TestJoinUpstreamURL pins the shared join formula: base-url is the
+// unversioned inference root and endpoints carry their protocol prefix, so
+// the join only normalizes the base's trailing slash.
 func TestJoinUpstreamURL(t *testing.T) {
-	legacy := func(base, endpoint string) string {
-		return strings.TrimSuffix(base, "/") + strings.TrimPrefix(endpoint, "/v1")
-	}
-	cases := []struct{ base, endpoint string }{
-		{"https://opencode.ai", "/v1/chat/completions"},
-		{"https://opencode.ai/", "/v1/messages"},
-		{"https://opencode.ai/zen/go/v1", "/v1/responses"},
-		{"https://opencode.ai", "v1@evil.com"},
-		{"https://opencode.ai", "/custom"},
-		{"https://opencode.ai/", ""},
+	cases := []struct{ base, endpoint, want string }{
+		{"https://opencode.ai/inference/go", "/openai/v1/chat/completions", "https://opencode.ai/inference/go/openai/v1/chat/completions"},
+		{"https://opencode.ai/inference/go/", "/anthropic/v1/messages", "https://opencode.ai/inference/go/anthropic/v1/messages"},
+		{"https://opencode.ai", "/v1/responses", "https://opencode.ai/v1/responses"},
+		{"https://opencode.ai", "v1@evil.com", "https://opencode.aiv1@evil.com"},
+		{"https://opencode.ai/", "", "https://opencode.ai"},
 	}
 	for _, c := range cases {
-		if got, want := JoinUpstreamURL(c.base, c.endpoint), legacy(c.base, c.endpoint); got != want {
-			t.Errorf("JoinUpstreamURL(%q, %q) = %q, legacy = %q", c.base, c.endpoint, got, want)
+		if got := JoinUpstreamURL(c.base, c.endpoint); got != c.want {
+			t.Errorf("JoinUpstreamURL(%q, %q) = %q, want %q", c.base, c.endpoint, got, c.want)
 		}
 	}
 }
@@ -769,11 +765,11 @@ func TestEndpointEscapesBase(t *testing.T) {
 		endpoint string
 		want     bool
 	}{
-		{"https://opencode.ai", "/v1@evil.com/x", true},
+		{"https://opencode.ai", "/v1@evil.com/x", false}, // leading "/" keeps @ in the path
 		{"https://opencode.ai", "@evil.com/", true},
-		{"https://opencode.ai/zen/go/v1", "/v1@evil.com/x", false}, // @ lands in path
+		{"https://opencode.ai/inference/go", "@evil.com/x", false}, // @ lands in path
 		{"https://opencode.ai", "/v1/chat/completions", false},
-		{"https://opencode.ai/zen/go/v1", "/v1/messages", false},
+		{"https://opencode.ai/inference/go", "/anthropic/v1/messages", false},
 		{"https://opencode.ai/", "/v1/responses", false},
 		{"https://OPENCODE.ai", "/v1/chat/completions", false}, // host compare is case-insensitive
 		{"https://opencode.ai", "v1@evil.com", true},
@@ -788,7 +784,7 @@ func TestEndpointEscapesBase(t *testing.T) {
 }
 
 // F-security pin: override endpoints are concatenated onto base-url; one that
-// rewrites the URL authority (e.g. "/v1@evil.com/x" against a bare-host
+// rewrites the URL authority (e.g. "@evil.com/x" against a bare-host
 // base-url) must exclude the model from the routable set (spec 05 §2).
 // Override endpoints flow through the same check before swap's validation.
 func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
@@ -798,7 +794,7 @@ func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
 		cfg := testCfg()
 		cfg.BaseURL = "https://opencode.ai"
 		cfg.RouteOverrides = map[string]config.RouteOverride{
-			"evil":      {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
+			"evil":      {Protocol: "chat-completions", Endpoint: "@evil.com/x"},
 			"custom-ok": {Protocol: "responses", Endpoint: "/v1/custom"},
 		}
 		fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[
@@ -834,9 +830,9 @@ func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
 
 	t.Run("path-hosted base keeps same-host @ endpoint routable", func(t *testing.T) {
 		cfg := testCfg()
-		cfg.BaseURL = "https://opencode.ai/zen/go/v1"
+		cfg.BaseURL = "https://opencode.ai/inference/go"
 		cfg.RouteOverrides = map[string]config.RouteOverride{
-			"glm-5.2": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
+			"glm-5.2": {Protocol: "chat-completions", Endpoint: "@evil.com/x"},
 		}
 		fc := &fakeClient{resp: pluginapi.HTTPResponse{
 			StatusCode: 200,
@@ -845,7 +841,7 @@ func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
 		m := newManager(cfg, fc)
 		mustRefresh(t, m)
 		rec := findModel(t, m.Models(), "glm-5.2")
-		if rec.EndpointPath != "/v1@evil.com/x" {
+		if rec.EndpointPath != "@evil.com/x" {
 			t.Errorf("EndpointPath = %q; @ stays in path on default-style base", rec.EndpointPath)
 		}
 	})
@@ -854,7 +850,7 @@ func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
 		cfg := testCfg()
 		cfg.BaseURL = "https://opencode.ai"
 		cfg.RouteOverrides = map[string]config.RouteOverride{
-			"mystery-model": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/y"},
+			"mystery-model": {Protocol: "chat-completions", Endpoint: "@evil.com/y"},
 		}
 		fc := &fakeClient{resp: pluginapi.HTTPResponse{
 			StatusCode: 200,
@@ -901,7 +897,7 @@ func TestFailClearsLookupIndex(t *testing.T) {
 
 // TestSeedFromRevalidatesEndpointsAgainstNewBase pins the seed-revalidation
 // fix: a record whose endpoint was safe under the OLD base-url (path-hosted,
-// so "/v1@evil.com/x" stays in the path) must not keep serving once seeded
+// so "@evil.com/x" stays in the path) must not keep serving once seeded
 // into a manager whose base-url is the bare host — there the join turns the
 // old host into userinfo and the endpoint escapes to an attacker authority.
 func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
@@ -913,7 +909,7 @@ func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
 	oldCfg.BaseURL = "https://api.test/v1"
 	oldCfg.CatalogURL = "https://api.test/v1/models"
 	oldCfg.RouteOverrides = map[string]config.RouteOverride{
-		"totally-new-x": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
+		"totally-new-x": {Protocol: "chat-completions", Endpoint: "@evil.com/x"},
 	}
 	prev := newManager(oldCfg, &fakeClient{resp: pluginapi.HTTPResponse{
 		StatusCode: 200,
@@ -926,7 +922,7 @@ func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
 	cfg.BaseURL = "https://opencode.ai"
 	cfg.CatalogURL = "https://opencode.ai/go/v1/models"
 	cfg.RouteOverrides = map[string]config.RouteOverride{
-		"totally-new-x": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
+		"totally-new-x": {Protocol: "chat-completions", Endpoint: "@evil.com/x"},
 	}
 	m := newManager(cfg, &fakeClient{})
 	m.SeedFrom(prev)

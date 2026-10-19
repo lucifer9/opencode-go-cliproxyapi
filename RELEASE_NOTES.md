@@ -12,6 +12,10 @@
 - Prevent duplicate auth records at cold start when readable filenames exist.
 - Reject invalid quota values and redact provider request errors.
 
+### Bug Fixes
+
+- Move upstream calls to the OpenCode Go inference API (`https://opencode.ai/inference/go`): Chat Completions and Responses use `/openai/v1/...`, Messages uses `/anthropic/v1/messages`, and the catalog and quota use `/v1/models` and `/v1/usage`.
+
 ### Upgrade
 
 1. Upgrade CLIProxyAPI to v8.0.0 or later.
@@ -27,6 +31,10 @@ Older dashboard builds do not show these controls.
 Existing credential files keep their names and stable IDs.
 Set `name:` on an API key to choose its display label.
 New files use readable names.
+
+If your config sets `base-url: https://opencode.ai/zen/go/v1`, change it to `https://opencode.ai/inference/go` or remove it to use the default.
+The old value is no longer supported and produces wrong upstream paths.
+Route override endpoints are now appended to `base-url` as-is, so write them with the protocol prefix (for example `/anthropic/v1/messages`).
 
 Special thanks to @darfink in #10.
 

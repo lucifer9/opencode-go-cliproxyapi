@@ -243,7 +243,7 @@ func newMockOpenCode(t *testing.T) *mockOpenCode {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
 	})
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/openai/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
 		_ = json.Unmarshal(body, &parsed)
@@ -271,7 +271,7 @@ func newMockOpenCode(t *testing.T) *mockOpenCode {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(integrationCompletion))
 	})
-	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
 		_ = json.Unmarshal(body, &parsed)
@@ -302,7 +302,7 @@ func newMockOpenCode(t *testing.T) *mockOpenCode {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(st.messagesBody))
 	})
-	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/openai/v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
 		_ = json.Unmarshal(body, &parsed)
@@ -386,10 +386,9 @@ func (st *mockOpenCode) chatRequest(t *testing.T) (path, auth string, body map[s
 }
 
 func integrationYAML(baseURL string) string {
-	// The real base-url carries the version segment (.../zen/go/v1); the
-	// mock server root therefore gets "/v1" appended so /v1/models and
-	// /v1/chat/completions line up.
-	return fmt.Sprintf("base-url: %s/v1\nallow-http: true\napi-keys:\n  - value: sk-test-1\n", baseURL)
+	// The mock server root plays the inference base (.../inference/go), so
+	// /v1/models and the protocol-prefixed endpoints line up with the mux.
+	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n", baseURL)
 }
 
 // newIntegrationManager registers a manager whose outbound calls flow
@@ -493,7 +492,7 @@ func TestChatNonStreamRoundTrip(t *testing.T) {
 	}
 
 	path, auth, upstream := st.chatRequest(t)
-	if path != "/v1/chat/completions" {
+	if path != "/openai/v1/chat/completions" {
 		t.Fatalf("mock path = %q", path)
 	}
 	if auth != "Bearer sk-test-1" {
@@ -1055,7 +1054,7 @@ func TestResponsesUnsupportedFeatureDescriptive(t *testing.T) {
 // ---- AC §E upstream errors + §F security, end to end -------------------
 
 func integrationTwoKeyYAML(baseURL string) string {
-	return fmt.Sprintf("base-url: %s/v1\nallow-http: true\napi-keys:\n  - value: sk-test-1\n  - value: sk-test-2\n", baseURL)
+	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n  - value: sk-test-2\n", baseURL)
 }
 
 func newTwoKeyManager(t *testing.T) (*Manager, *fakeCaller, *mockOpenCode) {
@@ -1151,7 +1150,7 @@ func TestHTTPSDefaultEnforced(t *testing.T) {
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
-	httpYAML := fmt.Sprintf("base-url: %s/v1\napi-keys:\n  - value: sk-test-1\n", st.srv.URL)
+	httpYAML := fmt.Sprintf("base-url: %s\napi-keys:\n  - value: sk-test-1\n", st.srv.URL)
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(httpYAML))
 	if err != nil {
 		t.Fatalf("register: %v", err)

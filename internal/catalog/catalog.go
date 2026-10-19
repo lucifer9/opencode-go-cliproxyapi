@@ -41,9 +41,9 @@ const (
 // EndpointPath returns the upstream endpoint path for the route (FR-004).
 // routeEndpoints maps each route to its upstream endpoint path.
 var routeEndpoints = map[Route]string{
-	RouteChatCompletions: "/v1/chat/completions",
-	RouteMessages:        "/v1/messages",
-	RouteResponses:       "/v1/responses",
+	RouteChatCompletions: "/openai/v1/chat/completions",
+	RouteMessages:        "/anthropic/v1/messages",
+	RouteResponses:       "/openai/v1/responses",
 }
 
 // EndpointPath returns the route's upstream endpoint path, or "" for
@@ -378,14 +378,14 @@ func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
 }
 
 // JoinUpstreamURL joins the configured base-url onto an endpoint path and
-// is the single source of truth for that join (spec 05 §2): base-url
-// already carries the version segment (default .../zen/go/v1, catalog at
-// {base}/models), so a leading "/v1" on the endpoint is dropped instead of
-// doubled. The authority-escape check (endpointEscapesBase) must parse
-// exactly the URL this produces — two independent join formulas would be
-// free to drift apart and validate one URL while sending another.
+// is the single source of truth for that join (spec 05 §2): base-url is the
+// unversioned inference root (default .../inference/go) and endpoints carry
+// their protocol prefix and version (/openai/v1/..., /anthropic/v1/...). The
+// authority-escape check (endpointEscapesBase) must parse exactly the URL
+// this produces — two independent join formulas would be free to drift
+// apart and validate one URL while sending another.
 func JoinUpstreamURL(baseURL, endpoint string) string {
-	return strings.TrimSuffix(baseURL, "/") + strings.TrimPrefix(endpoint, "/v1")
+	return strings.TrimSuffix(baseURL, "/") + endpoint
 }
 
 // endpointEscapesBase reports whether joining baseURL with endpoint via
