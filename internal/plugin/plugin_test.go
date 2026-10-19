@@ -448,7 +448,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 	if wire["method"] != http.MethodGet {
 		t.Fatalf("bridged method = %v, want GET", wire["method"])
 	}
-	if wire["url"] != "https://opencode.ai/zen/go/v1/models" {
+	if wire["url"] != "https://opencode.ai/inference/go/v1/models" {
 		t.Fatalf("bridged url = %v", wire["url"])
 	}
 	headers := wire["headers"].(map[string]any)
@@ -1133,8 +1133,8 @@ func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
 // failure and the next success, and background ticks fetch the NEW
 // catalog-url instead of the old one forever.
 func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
-	oldURL := "https://opencode.ai/zen/go/v1/models"
-	newURL := "https://mirror.test/api/models"
+	oldURL := "https://opencode.ai/inference/go/v1/models"
+	newURL := "https://mirror.test/api/v1/models"
 	catalogV1 := `{"data":[{"id":"glm-5.3"}]}`
 	catalogV2 := `{"data":[{"id":"minimax-m3"}]}`
 	var allowOldURL atomic.Bool

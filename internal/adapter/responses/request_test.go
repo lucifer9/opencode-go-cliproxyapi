@@ -60,7 +60,7 @@ func partMap(t *testing.T, item map[string]any, i int) map[string]any {
 }
 
 func TestEndpointPath(t *testing.T) {
-	if EndpointPath != "/v1/responses" {
+	if EndpointPath != "/openai/v1/responses" {
 		t.Errorf("EndpointPath = %q", EndpointPath)
 	}
 }
@@ -710,7 +710,7 @@ func TestClaudeUnknownRoleRejected(t *testing.T) {
 	_, eErr := BuildRequest("m", "claude",
 		[]byte(`{"max_tokens":10,"messages":[{"role":"robot","content":"x"}]}`), nil)
 	if eErr == nil || eErr.Class != errclass.ClassUnsupported ||
-		eErr.Message != `unsupported message role "robot" for /v1/responses` {
+		eErr.Message != `unsupported message role "robot" for /openai/v1/responses` {
 		t.Fatalf("garbage role = %+v", eErr)
 	}
 }

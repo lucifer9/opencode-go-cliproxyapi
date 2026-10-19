@@ -6,7 +6,7 @@ The plugin unifies model discovery, protocol translation, and execution across O
 
 ## The Problem
 
-OpenCode Go exposes models across multiple API protocols (OpenAI Chat Completions `/v1/chat/completions`, Anthropic Messages `/v1/messages`, and OpenAI Responses `/v1/responses`).
+OpenCode Go exposes models across multiple API protocols (OpenAI Chat Completions `/openai/v1/chat/completions`, Anthropic Messages `/anthropic/v1/messages`, and OpenAI Responses `/openai/v1/responses`, all under `https://opencode.ai/inference/go`).
 
 Without this plugin, using OpenCode Go in CLIProxyAPI requires configuring separate provider blocks for each protocol family. This leads to:
 - **Duplicated configuration & keys**: The same API keys must be configured across multiple provider blocks.
@@ -68,11 +68,11 @@ Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.op
 plugins:
   configs:
     opencode-go-cliproxyapi:
-      # Upstream base URL (default: "https://opencode.ai/zen/go/v1")
-      base-url: "https://opencode.ai/zen/go/v1"
+      # Upstream inference base URL (default: "https://opencode.ai/inference/go")
+      base-url: "https://opencode.ai/inference/go"
 
-      # Optional catalog endpoint override (default: "{base-url}/models")
-      # catalog-url: "https://opencode.ai/zen/go/v1/models"
+      # Optional catalog endpoint override (default: "{base-url}/v1/models")
+      # catalog-url: "https://opencode.ai/inference/go/v1/models"
 
       # Client-facing model ID prefix configuration
       model-prefix:
@@ -93,15 +93,15 @@ plugins:
 
       # Protocol enable/disable switches (all default to true)
       protocols:
-        chat-completions: true   # enables models routed to /v1/chat/completions
-        messages: true           # enables models routed to /v1/messages
-        responses: true          # enables models routed to /v1/responses
+        chat-completions: true   # enables models routed to /openai/v1/chat/completions
+        messages: true           # enables models routed to /anthropic/v1/messages
+        responses: true          # enables models routed to /openai/v1/responses
 
       # Explicit route overrides per model (takes priority over built-in prefix routing)
       route-overrides:
         "custom-model":
           protocol: "messages"           # "chat-completions" | "messages" | "responses"
-          endpoint: "/v1/messages"       # must start with /
+          endpoint: "/anthropic/v1/messages"  # must start with /; appended to base-url
 
       # Execution settings
       request-timeout: "5m"              # upstream request timeout (default: "5m")
@@ -114,8 +114,8 @@ plugins:
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `api-keys` | `[]object` | *(Required)* | List of API keys (`- value: "..."`, optional `name: "Personal"`). Supports `${ENV_VAR}` expansion. Duplicates and empty values are rejected. |
-| `base-url` | `string` | `https://opencode.ai/zen/go/v1` | Upstream base URL. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
-| `catalog-url` | `string` | `{base-url}/models` | Full URL for catalog discovery. Defaults to `{base-url}/models`. |
+| `base-url` | `string` | `https://opencode.ai/inference/go` | Upstream inference base URL; protocol endpoints and `/v1/usage` are appended to it. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
+| `catalog-url` | `string` | `{base-url}/v1/models` | Full URL for catalog discovery. Defaults to `{base-url}/v1/models`. |
 | `model-prefix.enabled` | `bool` | `true` | When `true`, client-facing model names use `<prefix>/<model>`. When `false`, uses bare model IDs. |
 | `model-prefix.value` | `string` | `opencode-go` | Provider prefix string when prefixing is enabled. |
 | `catalog.refresh-interval` | `duration` | `15m` | Interval between catalog polling refreshes (e.g. `15m`, `1h`). Minimum is `1m`. |
@@ -123,7 +123,7 @@ plugins:
 | `protocols.chat-completions` | `bool` | `true` | Protocol switch for Chat Completions endpoints. |
 | `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
 | `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
-| `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. Valid protocols: `chat-completions`, `messages`, `responses`. |
+| `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. `endpoint` is appended to `base-url` as-is. Valid protocols: `chat-completions`, `messages`, `responses`. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` / `catalog-url` for local testing. |

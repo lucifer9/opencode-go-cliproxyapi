@@ -197,12 +197,12 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "base-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Upstream base URL (default: https://opencode.ai/zen/go/v1).",
+			Description: "Upstream base URL (default: https://opencode.ai/inference/go).",
 		},
 		{
 			Name:        "catalog-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Optional catalog discovery URL (default: {base-url}/models).",
+			Description: "Optional catalog discovery URL (default: {base-url}/v1/models).",
 		},
 		{
 			Name:        "model-prefix",

@@ -1,5 +1,5 @@
 // Package messages implements the Anthropic Messages protocol adapter
-// (arch §8): upstream endpoint /v1/messages serving the MiniMax and Qwen
+// (arch §8): upstream endpoint /anthropic/v1/messages serving the MiniMax and Qwen
 // routes (FR-004). Request translation is FR-005, response and stream
 // translation FR-006, acceptance coverage AC §C.
 //

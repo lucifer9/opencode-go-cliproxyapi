@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"opencode-go-cliproxyapi/internal/catalog"
 	"opencode-go-cliproxyapi/internal/errclass"
 )
 
@@ -116,7 +117,7 @@ func normalizeCustomTool(tool *RespTool, target string) bool {
 	if tool.Type == "tool_search" || tool.Type == "image_generation" {
 		return false
 	}
-	if (target == "/v1/chat/completions" || target == "/v1/messages") &&
+	if (target == catalog.RouteChatCompletions.EndpointPath() || target == catalog.RouteMessages.EndpointPath()) &&
 		(tool.Type == "web_search" || tool.Type == "web_search_preview") {
 		return false
 	}
