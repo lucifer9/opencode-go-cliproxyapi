@@ -3,7 +3,7 @@ module opencode-go-cliproxyapi
 go 1.26.7
 
 require (
-	github.com/router-for-me/CLIProxyAPI/v8 v8.0.33
+	github.com/router-for-me/CLIProxyAPI/v8 v8.0.35
 	golang.org/x/net v0.61.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -31,7 +31,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.64.0 // indirect
+	github.com/quic-go/quic-go v0.64.1 // indirect
 	github.com/redis/go-redis/v9 v9.23.0 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/tidwall/gjson v1.20.0 // indirect
